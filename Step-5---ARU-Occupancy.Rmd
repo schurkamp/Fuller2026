@@ -1,0 +1,996 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Load required libraries
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(unmarked)
+library(AICcmodavg)
+library(stringr)
+```
+
+```{r}
+# STEP 5. Calculate ARU Occupancy
+
+# Specify input filepaths: 
+pc_aru_data <- read.csv("E:/Documents/Audubon/AGL/ARU/Validation/Verified/all_occ_zerofill_5_14_26.csv")
+
+pcdata <- pc_aru_data %>%
+  dplyr::filter(Protocol == "PC")
+
+arudata <- pc_aru_data %>%
+  dplyr::filter(Protocol == "ARU")
+
+arudata.orig <- arudata %>%
+  dplyr::select(Point, Route) %>%
+  distinct()
+
+
+  
+```
+
+```{r}
+#----------------------------------------------------------------------------------------------
+#Clean and prepare ARU data for analysis
+#-------------------------------------------------------------------------------------------
+# Check to make sure the same points/years are represented
+arudata %>% 
+  dplyr::group_by(Point, Year) %>%
+  summarize(Visit = length(unique(Visit)))
+
+# Read in data, clean and format
+
+# Convert survey covariates to 3D arrays
+points <- unique(arudata$Point)
+visits <- unique(arudata$Visit)
+years <- unique(arudata$Year)
+species <- unique(arudata$BirdCd)
+nPoints <- length(points)
+nVisits <- length(visits)
+nYears <- length(years)
+nSpecies <- length(species)
+
+#----------------------------------------------------------------------------------------------
+#Pulling out detections/nondetections at point level (converting species counts >0 to 1)
+#-------------------------------------------------------------------------------------------
+data.clean<-array(NA, dim=c(nPoints, nVisits, nYears, nSpecies))
+
+for (t in 1:nYears){
+  for (v in 1:nVisits){
+    for (p in 1:nPoints){
+      if(length(arudata[arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p],"IndivCount"])==0){
+        data.clean[p,v,t,] <- NA #if a visit or point was skipped, put NA for all species
+      } else {
+        for (s in 1:nSpecies){
+          temp<-arudata[arudata$BirdCd==species[s]&arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p], "IndivCount"]
+          if (sum(temp)>0){
+            data.clean[p,v,t,s]<-1
+          } else {
+            data.clean[p,v,t,s]<-0
+          } #species
+        }
+      } #1st else 
+    } #Points
+  }#Visits
+}#time
+
+dimnames(data.clean)<- list(Points=points, Visits=visits, Year=years, Species=species)
+#organize data by point, visit, year, species
+
+#Pull out individual species for separate modeling
+AMBI<-data.clean[,,,"AMBI"]
+AMCO<-data.clean[,,,"AMCO"]
+BLTE<-data.clean[,,,"BLTE"]
+BCNH<-data.clean[,,,"BCNH"]
+BWTE<-data.clean[,,,"BWTE"]
+COGA<-data.clean[,,,"COGA"]
+KIRA<-data.clean[,,,"KIRA"]
+LEBI<-data.clean[,,,"LEBI"]
+LBHE<-data.clean[,,,"LBHE"]
+#MALL<-data.clean[,,,"MALL"]
+MAWR<-data.clean[,,,"MAWR"]
+PBGR<-data.clean[,,,"PBGR"]
+SORA<-data.clean[,,,"SORA"]
+SWSP<-data.clean[,,,"SWSP"]
+VIRA<-data.clean[,,,"VIRA"]
+YCNH<-data.clean[,,,"YCNH"]
+YHBL<-data.clean[,,,"YHBL"]
+#WODU<-data.clean[,,,"WODU"]
+#UNK<-data.clean[,,,"---"]
+
+#total detections per species:
+detects <- NULL
+for(i in 1:length(species)){  
+  detects[i] <- sum(data.clean[,,,i], na.rm=TRUE)
+}
+sp.detects <- data.frame(species,detects) %>%
+  filter(detects >= 25) 
+
+# list of species with >= 30 detections
+species.list <- unique(sp.detects$species)
+```
+
+```{r}
+#----------------------------------------------------------------------------------------------------
+#STEP 1: for species of interest, reformat for 'stacking' years (treating site-years independently)
+#----------------------------------------------------------------------------------------------------
+
+# "AMBI" "AMCO" "BCNH" "BWTE" "COGA" "LEBI" "MAWR" "PBGR" "SORA" "SWSP" "VIRA" "YHBL"
+
+#AMBI
+AMBI.all0 <- rbind(AMBI[,,1],AMBI[,,2],AMBI[,,3])
+
+#AMCO
+AMCO.all0 <- rbind(AMCO[,,1],AMCO[,,2],AMCO[,,3])
+
+#BCNH
+BCNH.all0 <- rbind(BCNH[,,1],BCNH[,,2],BCNH[,,3])
+
+#BWTE
+BWTE.all0 <- rbind(BWTE[,,1],BWTE[,,2],BWTE[,,3])
+
+#COGA 
+COGA.all0 <- rbind(COGA[,,1],COGA[,,2],COGA[,,3])
+
+#KIRA - 26 detections, almost 30
+KIRA.all0 <- rbind(KIRA[,,1],KIRA[,,2],KIRA[,,3])
+
+#LEBI 
+LEBI.all0 <- rbind(LEBI[,,1],LEBI[,,2],LEBI[,,3])
+
+#MAWR 
+MAWR.all0 <- rbind(MAWR[,,1],MAWR[,,2],MAWR[,,3])
+
+#PBGR
+PBGR.all0 <- rbind(PBGR[,,1],PBGR[,,2],PBGR[,,3])
+
+#SORA 
+SORA.all0 <- rbind(SORA[,,1],SORA[,,2],SORA[,,3])
+
+#SWSP 
+SWSP.all0 <- rbind(SWSP[,,1],SWSP[,,2],SWSP[,,3])
+
+#VIRA 
+VIRA.all0 <- rbind(VIRA[,,1],VIRA[,,2],VIRA[,,3])
+
+#YHBL
+YHBL.all0 <- rbind(YHBL[,,1],YHBL[,,2],YHBL[,,3])
+```
+
+
+```{r}
+#----------------------------------------------------------------------------------------------------
+#STEP 2: pull out observation covariates at point level
+#----------------------------------------------------------------------------------------------------
+
+## I. Pull out date ##
+#First convert date to jdate
+arudata$Jdate <- as.POSIXlt(arudata$Date, format = "%Y-%m-%d")$yday + 1
+
+#looks right, min:121 (1 May), max:167, mean date:142 (23 May)
+
+dates<-array(NA, dim=c(nPoints, nVisits, nYears))
+
+for (t in 1:nYears){
+  for (v in 1:nVisits){
+    for (p in 1:nPoints){
+      if(length(arudata[arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p],"IndivCount"])==0){
+        dates[p,v,t] <- NA #record NA instead of date when no survey or point skipped (for consistency)
+      } else {
+        temp<-arudata[arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p], "Jdate"]
+        if (length(temp)>1){
+          dates[p,v,t]<-round(sum(temp)/length(temp),0)
+        } else {
+          dates[p,v,t]<-round(sum(arudata[arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p],"Jdate"])/length(arudata[arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p],"Jdate"]),0)
+        } # else
+      } #1st else 
+    } #Points
+  }#Visits
+}#time
+#this sums date and divides by number of entries of that date to yield a single date variable for each point/visit.
+
+dimnames(dates)<- list(Points=points, Visits=visits, Year=years)
+
+#stack years (UPDATE TO # YEARS)
+dates.orig <- rbind(dates[,,1],dates[,,2],dates[,,3])
+
+## II. Pull out survey start time ##
+#First convert to hour.minute start time
+arudata$Stime <- sapply(strsplit(arudata$StartTime, ":"), function(x) {
+  x <- as.numeric(x)
+  x[1] + x[2] / 60
+}) #warnings OK here
+
+times<-array(NA, dim=c(nPoints, nVisits, nYears))
+
+for (t in 1:nYears){
+  for (v in 1:nVisits){
+    for (p in 1:nPoints){
+      if(length(arudata[arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p],"IndivCount"])==0){
+        times[p,v,t] <- NA #record NA instead of date when no survey or point skipped
+      } else {
+        temp<-arudata[arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p], "Stime"]
+        if (length(temp)>1){
+          times[p,v,t]<-round(sum(temp)/length(temp),2)
+        } else {
+          times[p,v,t]<-round(sum(arudata[arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p],"Stime"])/length(arudata[arudata$Year==years[t]&arudata$Visit==visits[v]&arudata$Point==points[p],"Stime"]),2)
+        } # else
+      } #1st else 
+    } #Points
+  }#Visits
+}#time
+
+dimnames(times)<- list(Points=points, Visits=visits, Year=years)
+
+#stack years
+times.orig <- rbind(times[,,1],times[,,2],times[,,3])
+
+#add in year as categorical variable (siteCov) based on number of points surveyed (nPoints)
+year <- c(rep("2022",nPoints),rep("2023",nPoints),rep("2024",nPoints))
+
+# Save covariates
+ARU_covariates <- list(
+  dates_aru  = dates.orig,
+  times_aru  = times.orig
+)
+
+saveRDS(ARU_covariates,
+        "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_Covariates_ARU/ARU_covariates.rds")
+```
+
+```{r}
+#------------------------------------------------------------------------------------------------------
+#STEP 3A: model fitting: null
+#-----------------------------------------------------------------------------------------------------
+#identify which rows of covariates are all NAs (i.e. not surveyed)
+
+na_check <- rowSums(is.na(dates.orig)) == ncol(dates.orig)
+rowdrops.orig <- which(na_check)
+table(na_check)
+# "AMBI" "AMCO" "BCNH" "BWTE" "COGA" "LEBI" "MAWR" "PBGR" "SORA" "SWSP" "VIRA" "YHBL"
+
+AMBI.all <- AMBI.all0[-c(rowdrops.orig),]
+AMCO.all <- AMCO.all0[-c(rowdrops.orig),]
+BCNH.all <- BCNH.all0[-c(rowdrops.orig),]
+BWTE.all <- BWTE.all0[-c(rowdrops.orig),]
+COGA.all <- COGA.all0[-c(rowdrops.orig),]
+KIRA.all <- KIRA.all0[-c(rowdrops.orig),]
+LEBI.all <- LEBI.all0[-c(rowdrops.orig),]
+MAWR.all <- MAWR.all0[-c(rowdrops.orig),]
+PBGR.all <- PBGR.all0[-c(rowdrops.orig),] 
+SWSP.all <- SWSP.all0[-c(rowdrops.orig),]
+SORA.all <- SORA.all0[-c(rowdrops.orig),]
+VIRA.all <- VIRA.all0[-c(rowdrops.orig),]
+YHBL.all <- YHBL.all0[-c(rowdrops.orig),]
+
+dates.orig <- dates.orig[-c(rowdrops.orig),] 
+times.orig <- times.orig[-c(rowdrops.orig),] 
+year <- year[-c(rowdrops.orig)] 
+
+#Scale obsCovs
+dates <- round(scale(dates.orig),3)
+times <- round(scale(times.orig),3)
+
+#Make unmarked data frame (run separate models for each species of interest) --------------------------------------------
+run_umf <- function(species.all) {
+  umf <- unmarkedFrameOccu(y=species.all,obsCovs=list(date=dates,time=times),
+                         siteCovs=data.frame(year=year))
+  return(umf)
+}
+
+AMBI.umf <- run_umf(AMBI.all)
+AMCO.umf <- run_umf(AMCO.all)
+BCNH.umf <- run_umf(BCNH.all)
+BWTE.umf <- run_umf(BWTE.all)
+COGA.umf <- run_umf(COGA.all)
+KIRA.umf <- run_umf(KIRA.all)
+LEBI.umf <- run_umf(LEBI.all)
+MAWR.umf <- run_umf(MAWR.all)
+PBGR.umf <- run_umf(PBGR.all) 
+SWSP.umf <- run_umf(SWSP.all)
+SORA.umf <- run_umf(SORA.all)
+VIRA.umf <- run_umf(VIRA.all)
+YHBL.umf <- run_umf(YHBL.all)
+
+##Test null model first, example, AMBI
+fm1 <- occu(~1 ~1, AMBI.umf)
+backTransform(fm1, type="state") #e.g. occupancy of AMBI: 0.2304355, about 23% of points are occupied
+backTransform(fm1, type="det") #e.g. detection of AMBI: 0.3446975, 34% chance of picking up AMBI if it’s located at a point
+```
+
+```{r}
+#--------------------------------------------------------------
+#STEP 3B: model selection
+#Detection probability (occupancy constant)
+#--------------------------------------------------------------
+#Detection covariates follow first tilde, occupancy covariates follow second tilde
+#Models asking: does detection probability change depending on date or time?
+
+library(tibble)
+
+model_review <- function(umf) {
+  fit_models <- list(
+  null <- occu(~1~1, data=umf, control=list(trace=TRUE, REPORT=1)),
+  mod1 <- occu(~date~1, data=umf, control=list(trace=TRUE, REPORT=1)),
+  mod2 <- occu(~date+I(date^2)~1, data=umf, control=list(trace=TRUE, REPORT=1)),
+  mod3 <- occu(~time~1, data=umf, control=list(trace=TRUE, REPORT=1)),
+  mod4 <- occu(~time+I(time^2)~1, data=umf, control=list(trace=TRUE, REPORT=1)),
+  mod5 <- occu(~date+time~1, data=umf, control=list(trace=TRUE, REPORT=1)),
+  mod6 <- occu(~date+I(date^2)+time~1, data=umf, control=list(trace=TRUE, REPORT=1)),
+  mod7 <- occu(~date+time+I(time^2)~1, data=umf, control=list(trace=TRUE, REPORT=1)),
+  mod8 <- occu(~date+I(date^2)+time+I(time^2)~1, data=umf, control=list(trace=TRUE, REPORT=1))
+  )
+  # Extract convergence status
+  convergence_status <- sapply(fit_models, function(m) m@opt$convergence == 0)
+  model_names <- c("null", "mod1", "mod2", "mod3", "mod4", "mod5", "mod6", "mod7", "mod8")
+  conv_df <- data.frame(model = model_names, Converged = convergence_status)
+  
+  # Put the fitted models in a "fitList" and rank them by AIC
+  fl <- modSel(fitList(null,mod1,mod2,mod3,mod4,mod5,mod6,mod7,mod8))
+  
+  fl_df <- fl@Full %>%
+    tibble::rownames_to_column(var = "Model") %>%
+    dplyr::select(model, nPars, AIC, delta, AICwt, cumltvWt) %>%
+    dplyr::left_join(conv_df, by = "model")
+  
+  return(fl_df)
+}
+
+
+
+AMBI.fl <- model_review(AMBI.umf) # mod2
+AMCO.fl <- model_review(AMCO.umf) # mod5
+BCNH.fl <- model_review(BCNH.umf) # mod2 
+BWTE.fl <- model_review(BWTE.umf) # mod2
+COGA.fl <- model_review(COGA.umf) # mod5
+KIRA.fl <- model_review(KIRA.umf) # mod1
+LEBI.fl <- model_review(LEBI.umf) # mod6
+MAWR.fl <- model_review(MAWR.umf) # mod1 
+PBGR.fl <- model_review(PBGR.umf) # mod7
+SWSP.fl <- model_review(SWSP.umf) # mod8 
+SORA.fl <- model_review(SORA.umf) # mod8
+VIRA.fl <- model_review(VIRA.umf) # mod4
+YHBL.fl <- model_review(YHBL.umf) # mod2
+
+# everything converged
+# lowest AIC = best model
+
+# check to see if there is a better model for the species with poor c-hat
+```
+
+```{r}
+#--------------------------------------------------------------
+#STEP 3B: model selection continued
+#Detection probability (occupancy constant), with year
+#Given the chosen detection structure, how does occupancy change across years?
+#Measures a separate occupancy value for each year directly
+#--------------------------------------------------------------
+# Add year with top model selection
+run_year_model <- function(model_df, umf, model_num = 1) {
+  
+  # Remove models that did not converge
+  model_df <- model_df %>%
+    filter(Converged == "TRUE")
+  
+  # Get top model name from first row
+  top_model_name <- model_df[model_num,1]
+  
+  # Define model formulas
+  model_formulas <- list(
+    null = ~1 ~ year - 1,
+    mod1 = ~date ~ year - 1, #~date~1
+    mod2 = ~date + I(date^2) ~ year - 1, #~date+I(date^2)~1
+    mod3 = ~time ~ year - 1, #~time~1
+    mod4 = ~time + I(time^2) ~ year - 1, #~time+I(time^2)~1
+    mod5 = ~date + time ~ year - 1, #~date+time~1
+    mod6 = ~date + I(date^2) + time ~ year - 1, #~date+I(date^2)+time~1
+    mod7 = ~date + time + I(time^2) ~ year - 1, #~date+time+I(time^2)~1
+    mod8 = ~date + I(date^2) + time + I(time^2) ~ year - 1 #~date+I(date^2)+time+I(time^2)~1
+  )
+
+  # Validate model name
+  if (!top_model_name %in% names(model_formulas)) {
+    stop(paste("Model", top_model_name, "not found in model_formulas list."))
+  }
+
+  # Check if 'year' in umf has ≥ 2 levels
+  if (length(unique(siteCovs(umf)$year)) < 2) {
+    stop("Error: 'year' covariate must have at least 2 levels for contrast modeling.")
+  }
+
+  # Run occupancy model
+  occu(
+    formula = model_formulas[[top_model_name]],
+    data = umf,
+    control = list(trace = TRUE, REPORT = 1)
+  )
+}
+
+```
+
+```{r}
+#-----------------------------------------------------------
+#STEP 3C: model selection
+#Occupancy probability (with top detection model)
+#-----------------------------------------------------------
+#try 2nd model with BWTE, KIRA, MAWR
+#include year on occ to get year-specific occ ests
+ambi.a <- run_year_model(AMBI.fl, AMBI.umf) 
+amco.a <- run_year_model(AMCO.fl, AMCO.umf)
+bcnh.a <- run_year_model(BCNH.fl, BCNH.umf) 
+bwte.a <- run_year_model(BWTE.fl, BWTE.umf, model_num = 2) 
+coga.a <- run_year_model(COGA.fl, COGA.umf)
+kira.a <- run_year_model(KIRA.fl, KIRA.umf, model_num = 2)  
+lebi.a <- run_year_model(LEBI.fl, LEBI.umf) 
+mawr.a <- run_year_model(MAWR.fl, MAWR.umf, model_num = 2) 
+pbgr.a <- run_year_model(PBGR.fl, PBGR.umf)
+swsp.a <- run_year_model(SWSP.fl, SWSP.umf)
+sora.a <- run_year_model(SORA.fl, SORA.umf)
+vira.a <- run_year_model(VIRA.fl, VIRA.umf)
+yhbl.a <- run_year_model(YHBL.fl, YHBL.umf, model_num = 2) 
+
+#save model files
+save(ambi.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/AMBI_occ_OC.Rda")
+save(amco.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/AMCO_occ_OC.Rda")
+save(bcnh.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/BCNH_occ_OC.Rda")
+save(bwte.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/BWTE_occ_OC.Rda")
+save(coga.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/COGA_occ_OC.Rda")
+save(kira.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/KIRA_occ_OC.Rda")
+save(lebi.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/LEBI_occ_OC.Rda")
+save(mawr.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/MAWR_occ_OC.Rda")
+save(pbgr.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/PBGR_occ_OC.Rda")
+save(swsp.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/SWSP_occ_OC.Rda")
+save(sora.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/SORA_occ_OC.Rda")
+save(vira.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/VIRA_occ_OC.Rda")
+save(yhbl.a,file="E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/YHBL_occ_OC.Rda")
+
+saveRDS(AMBI.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/AMBI.umf.rds")
+saveRDS(AMCO.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/AMCO.umf.rds")
+saveRDS(BCNH.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/BCNH.umf.rds")
+saveRDS(BWTE.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/BWTE.umf.rds")
+saveRDS(COGA.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/COGA.umf.rds")
+saveRDS(KIRA.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/KIRA.umf.rds")
+saveRDS(LEBI.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/LEBI.umf.rds")
+saveRDS(MAWR.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/MAWR.umf.rds")
+saveRDS(PBGR.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/PBGR.umf.rds")
+saveRDS(SWSP.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/SWSP.umf.rds")
+saveRDS(SORA.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/SORA.umf.rds")
+saveRDS(VIRA.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/VIRA.umf.rds")
+saveRDS(YHBL.umf, "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles/YHBL.umf.rds")
+```
+
+```{r}
+#---------------------------------------------------------------------------------
+#STEP 4: GOF of top model to get chat value for visualizing predictions
+#---------------------------------------------------------------------------------
+#preferred GOF test
+
+fitstats <- function(fm) {
+  observed <- getY(fm@data)
+  expected <- fitted(fm)
+  resids <- residuals(fm)
+  sse <- sum(resids^2, na.rm=TRUE)
+  chisq <- sum((observed - expected)^2 / expected, na.rm=TRUE)
+  freeTuke <- sum((sqrt(observed) - sqrt(expected))^2, na.rm=TRUE)
+  out <- c(SSE=sse, Chisq=chisq, freemanTukey=freeTuke)
+  return(out)
+}
+
+# DOUBLE CHECK HAT!!!
+ambi.pb <- parboot(ambi.a, fitstats, nsim=1000, report=1)
+ambi_chat_pb <- ambi.pb@t0[2] / mean(ambi.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+amco.pb <- parboot(amco.a, fitstats, nsim=1000, report=1)
+amco_chat_pb <- amco.pb@t0[2] / mean(amco.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+bcnh.pb <- parboot(bcnh.a, fitstats, nsim=1000, report=1)
+bcnh_chat_pb <- bcnh.pb@t0[2] / mean(bcnh.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+bwte.pb <- parboot(bwte.a, fitstats, nsim=1000, report=1)
+bwte_chat_pb <- bwte.pb@t0[2] / mean(bwte.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+coga.pb <- parboot(coga.a, fitstats, nsim=1000, report=1)
+coga_chat_pb <- coga.pb@t0[2] / mean(coga.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+kira.pb <- parboot(kira.a, fitstats, nsim=1000, report=1)
+kira_chat_pb <- kira.pb@t0[2] / mean(kira.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+lebi.pb <- parboot(lebi.a, fitstats, nsim=1000, report=1)
+lebi_chat_pb <- lebi.pb@t0[2] / mean(lebi.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+mawr.pb <- parboot(mawr.a, fitstats, nsim=1000, report=1)
+mawr_chat_pb <- mawr.pb@t0[2] / mean(mawr.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+pbgr.pb <- parboot(pbgr.a, fitstats, nsim=1000, report=1)
+pbgr_chat_pb <- pbgr.pb@t0[2] / mean(pbgr.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+swsp.pb <- parboot(swsp.a, fitstats, nsim=1000, report=1)
+swsp_chat_pb <- swsp.pb@t0[2] / mean(swsp.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+sora.pb <- parboot(sora.a, fitstats, nsim=1000, report=1)
+sora_chat_pb <- sora.pb@t0[2] / mean(sora.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+vira.pb <- parboot(vira.a, fitstats, nsim=1000, report=1)
+vira_chat_pb <- vira.pb@t0[2] / mean(vira.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+yhbl.pb <- parboot(yhbl.a, fitstats, nsim=1000, report=1)
+yhbl_chat_pb <- yhbl.pb@t0[2] / mean(yhbl.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+
+
+bwte.pb <- parboot(bwte.a, fitstats, nsim=1000, report=1)
+bwte_chat_pb <- bwte.pb@t0[2] / mean(bwte.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+
+kira.pb <- parboot(kira.a, fitstats, nsim=1000, report=1)
+kira_chat_pb <- kira.pb@t0[2] / mean(kira.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+
+mawr.pb <- parboot(mawr.a, fitstats, nsim=1000, report=1)
+mawr_chat_pb <- mawr.pb@t0[2] / mean(mawr.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+
+yhbl.pb <- parboot(yhbl.a, fitstats, nsim=1000, report=1)
+yhbl_chat_pb <- yhbl.pb@t0[2] / mean(yhbl.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+
+#verify all chat_pb around 1 (0.9 - 1.1)
+# also check the chisq p value, want this to be ~0.5 or higher
+# can check models (update in the run_year_model code with a delta AIC of 2 or below, check .fl output to see which models these are)
+
+ambi_chat_pb # 1.085324     
+amco_chat_pb # 0.9727311     
+bcnh_chat_pb # 0.9117442   
+bwte_chat_pb # CHECK 1.15 
+# need to drop BWTE, p-values for tukey and chisq are poor (almost 0.05)
+coga_chat_pb # 1.032621   
+kira_chat_pb # CHECK 1.338336
+lebi_chat_pb # 1.013369   
+mawr_chat_pb # CHECK 0.8479662 Still okay for inference, just needs to be correct is predictions are visualized, greater uncertainty but not necessarily biased.  
+pbgr_chat_pb # 0.9612931    
+swsp_chat_pb # 1.02254   
+sora_chat_pb # 1.00714    
+vira_chat_pb # 1.050742   
+yhbl_chat_pb # CHECK 1.268794    
+
+# Species to review (c-hat out of range)
+ambi.a <- run_year_model(AMBI.fl, AMBI.umf, model_num = 1) # can only review the first two models
+ambi.pb <- parboot(ambi.a, fitstats, nsim=1000, report=1)
+ambi_chat_pb <- ambi.pb@t0[2] / mean(ambi.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+# model 1: 1.123582, chisq p = 0.1758242
+# model 2: 1.145909, chisq p = 0.1488511
+# reviewed annual estimates, only 2022 is uncertain so we can keep
+
+bwte.a <- run_year_model(BWTE.fl, BWTE.umf, model_num = 2) # can only review the first two models
+bwte.pb <- parboot(bwte.a, fitstats, nsim=1000, report=1)
+bwte_chat_pb <- bwte.pb@t0[2] / mean(bwte.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+# model 1: 1.170064, chisq p = 0.05894106
+# model 2: 1.164372, chisq p = 0.06293706
+# need to drop BWTE
+
+kira.a <- run_year_model(KIRA.fl, KIRA.umf, model_num = 4) # can review the first 4 models
+kira.pb <- parboot(kira.a, fitstats, nsim=1000, report=1)
+kira_chat_pb <- kira.pb@t0[2] / mean(kira.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+# model 1: 1.311271, chisq p = 0.1558442
+# model 2: 1.259784, chisq p = 0.2017982
+# model 3: 1.342129, chisq p = 0.1118881
+# model 4: 1.342129, chisq p = 0.1118881
+# model 4: 1.316071, chisq p = 0.1608392
+# need to drop KIRA
+
+mawr.a <- run_year_model(MAWR.fl, MAWR.umf, model_num = 1) # can only review the first two models
+mawr.pb <- parboot(mawr.a, fitstats, nsim=1000, report=1)
+mawr_chat_pb <- mawr.pb@t0[2] / mean(mawr.pb@t.star[,2]) #verify all chat_pb around 1 (0.9 - 1.1)
+# model 1: 0.7976074, chisq p = 0.9870130 (good - keep this one)
+# model 2: 0.7879075, chisq p = 0.9940060 (also good)
+
+# KEEP: AMCO, BCNH, COGA, LEBI, MAWR, PBGR, SWSP, SORA, VIRA, YHBL
+# NOTING: MAWR is underdispersed, greater uncertainty
+
+# HOW TO INTERPRET
+# Compares observed vs. expected data (predicted)
+
+# sse (sum of squared errors) = total mismatch between observed and predicted, lower is a better fit
+
+# chisq = how far observed values deviate from expected, scaled
+  # observed chi square = sum of observed - expected^2 / expected
+  # expected chi square = bootstrapping simulation tells you what distribution of chi-square values are "normal" or expected
+
+# freeman-tukey = similar to chisq but more stable with small values
+
+# GOF Table Interpretation
+# t0 = observed, mean(t0 - t_B) = mean difference from simulated, Pr(t_B > t0) = p-value (don't want this to be significant)
+
+# c-hat = observed chi square / expected chi square, want these to be almost the same (0.9 - 1.1)
+  # if <1, the observed variability is less than expected, the data is more consistent than the model expected
+  # if >1, the observed variability is greater than expected, i.e., the species behaves more unpredictably than the model explains (would other covariates help in this case?)
+
+```
+
+```{r}
+#----------------------------------------------------------------------------------
+#STEP 5: Analysis of results
+#---------------------------------------------------------------------------------
+
+analyze_species_occ <- function(model, species_code, species_label, 
+                                   umf, arudata.orig,
+                                   year_vec = c("2022","2023","2024"),
+                                   outdir_annualocc = "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_AnnualOcc/",
+                                   outdir_occ = "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_SiteOcc/",
+                                   outdir_figs = "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_Figs/",
+                                   c_hat = 1) {
+  require(ggplot2)
+  require(AICcmodavg)
+  require(plyr)
+  require(dplyr)
+  
+  #-------------------------------
+  # Step 1: Annual occupancy predictions
+  #-------------------------------
+  lamNewData <- data.frame(year = year_vec)
+  pred0 <- modavgPred(
+    cand.set = list(model),
+    newdata = lamNewData,
+    parm.type = "psi",
+    type = "response",
+    c.hat = c_hat,
+    conf.level = 0.95
+  )
+  
+  means <- c(pred0[[2]])
+  stanerror <- c(pred0[[3]])
+  lowerci <- c(pred0[[5]])
+  upperci <- c(pred0[[6]])
+  year <- unique(year_vec)
+  
+  full.df <- data.frame(means, stanerror, lowerci, upperci, year)
+  
+  # Save annual occupancy
+  write.table(full.df,
+              file = paste0(outdir_annualocc, species_code, "_occ_thru24.csv"),
+              sep = ",", row.names = FALSE)
+  
+  #-------------------------------
+  # Plot 1: occupancy
+  #-------------------------------
+  outfile1 <- paste0(outdir_figs, tolower(species_code), "_occ.tiff")
+  if (file.exists(outfile1)) file.remove(outfile1)
+  
+  tiff(outfile1, units="in", width=4, height=3.5, res=300)
+  print(
+    ggplot(full.df, aes(x=factor(year), y=means)) +
+      geom_errorbar(aes(ymin=lowerci, ymax=upperci),
+                    size=1.1,width=0,color=alpha("#4682B4",0.6))+
+      geom_line(aes(group=1), lty=2, color="#4682B4", size=1.3)+
+      geom_point(color="#4682B4",size=2.0, shape=21, stroke=1.3,fill="white")+
+      scale_y_continuous(limits=c(0,1))+
+      labs(y="Occupancy probability",x="Year")+
+      annotate("text", x=length(year_vec), y=0.9,
+               label=paste0('bold("', species_label, '")'), parse=TRUE)+
+      theme_bw() +
+      theme(panel.grid = element_blank(),
+            panel.border = element_rect(colour="black"),
+            legend.position="none")
+  )
+  dev.off()
+  
+  #-------------------------------
+  # Plot 2: trend with CI (fixed for 3 years)
+  #-------------------------------
+  full.df$year <- as.numeric(as.character(full.df$year))
+
+  outfile2 <- paste0(outdir_figs, tolower(species_code), "_occ_trend.tiff")
+  if (file.exists(outfile2)) file.remove(outfile2)
+
+  tiff(outfile2, units="in", width=4, height=4, res=300)
+  print(
+    ggplot(full.df, aes(x = year, y = means)) +
+      geom_point(shape=21,size=2.5, col="black",fill="white", stroke=1.5) +
+      stat_smooth(method="lm", col="cadetblue4", size=1.2, fill="#ABCCCD", se = TRUE) +
+      scale_y_continuous(limits=c(-0.1,1))+
+      labs(y="Occupancy probability",x="Year")+
+      theme_bw()+
+      labs(title = paste(
+        "Slope =", signif(coef(lm(means ~ year))[2], 2),
+        "R2 =", signif(summary(lm(means ~ year))$r.squared, 2),
+        "P =", signif(summary(lm(means ~ year))$coef[2,4], 2)
+      ))
+  )
+  dev.off()
+    
+  #-------------------------------
+  # Step 3: Point-specific occupancy
+  #-------------------------------
+  occ_est <- as.numeric(fitted(model))
+  
+  pred <- predict(model, type = "state")
+
+  # Extract SE BUT keep same length/order assumption
+  occ_se <- as.numeric(pred$SE)
+  
+  # Point names and years from UMF
+  umf <- umf
+  ptnames_model <- rownames(umf@y)
+  year_model <- siteCovs(umf)$year
+  
+  # Match routes
+  routes.df <- left_join(
+    data.frame(Point = ptnames_model),
+    arudata.orig,
+    by = "Point"
+  )
+  
+  # Final dataset
+  spp.output <- data.frame(
+    Point = ptnames_model,
+    Route = routes.df$Route,
+    Year = year_model,
+    occ_est = occ_est,
+    occ_se = occ_se
+  ) %>%
+    filter(!is.na(occ_est))
+  
+  # Summarize to route-year
+  output.spp <- plyr::ddply(
+    spp.output,
+    c("Year", "Route"),
+    summarise,
+    mocc = mean(occ_est, na.rm = TRUE),
+    mean_se = sd(occ_est, na.rm = TRUE) / sqrt(length(occ_est[!is.na(occ_est)]))
+  )
+  
+  # Save Route-Year occupancy
+  write.csv(output.spp,
+            file = paste0(outdir_occ, species_code, "_occ_output_2024.csv"),
+            row.names = FALSE)
+}
+
+species_list <- list(
+  "AMBI" = ambi.a, 
+  "AMCO" = amco.a, 
+  "BCNH" = bcnh.a,
+  "COGA" = coga.a, 
+  #"KIRA" = kira.a, 
+  "MAWR" = mawr.a,
+  "PBGR" = pbgr.a, 
+  "SWSP" = swsp.a, 
+  "SORA" = sora.a,
+  "VIRA" = vira.a, 
+  "YHBL" = yhbl.a, 
+  "LEBI" = lebi.a
+)
+umf_list <- c(AMBI.umf, 
+              AMCO.umf, 
+              BCNH.umf, 
+              COGA.umf, 
+              #KIRA.umf, 
+              MAWR.umf, 
+              PBGR.umf, 
+              SWSP.umf, 
+              SORA.umf, 
+              VIRA.umf, 
+              YHBL.umf, 
+              LEBI.umf)
+
+labels <- c("American Bittern", 
+            "American Coot", 
+            "Black-crowned Night-heron",
+            "Common Gallinule", 
+            #"King Rail", 
+            "Marsh Wren", 
+            "Pied-billed Grebe", 
+            "Swamp Sparrow", 
+            "Sora",
+            "Virginia Rail", 
+            "Yellow-headed Blackbird", 
+            "Least Bittern")
+
+for (i in seq_along(species_list)) {
+  analyze_species_occ(
+    model = species_list[[i]],
+    species_code = names(species_list)[i],
+    species_label = labels[i],
+    umf = umf_list[[i]],              # replace with correct UMF for species
+    arudata.orig = arudata.orig       # original ARU mapping
+  )
+}
+
+
+```
+
+
+
+
+```{r}
+#----------------------------------------------------------------------------------
+#STEP 6: Plot Detection Covariates
+#---------------------------------------------------------------------------------
+
+plot_det_covariates <- function(
+  umf,
+  model,
+  species_code,          # e.g. "MAWR"
+  species_name,          # e.g. "Marsh Wren"
+  dates_orig,
+  times_orig,
+  origin_date = "2024-01-01",
+  out_dir
+) {
+
+  library(ggplot2)
+  library(lubridate)
+
+  #---------------------------------------------------------
+  # 1. Scaling parameters
+  #---------------------------------------------------------
+  date_mean <- mean(dates_orig, na.rm = TRUE)
+  date_sd   <- sd(dates_orig, na.rm = TRUE)
+  time_mean <- mean(times_orig, na.rm = TRUE)
+  time_sd   <- sd(times_orig, na.rm = TRUE)
+
+  #---------------------------------------------------------
+  # 2. DATE effect
+  #---------------------------------------------------------
+  date_seq_scaled <- seq(
+    min(umf@obsCovs$date, na.rm = TRUE),
+    max(umf@obsCovs$date, na.rm = TRUE),
+    length.out = 100
+  )
+
+  date_seq_real <- date_seq_scaled * date_sd + date_mean
+  date_seq_calendar <- as.Date(date_seq_real - 1, origin = origin_date)
+
+  fixed_time_scaled <- median(umf@obsCovs$time, na.rm = TRUE)
+
+  new_data_date <- data.frame(
+    date = date_seq_scaled,
+    `I(date^2)` = date_seq_scaled^2,
+    time = fixed_time_scaled,
+    `I(time^2)` = fixed_time_scaled^2
+  )
+
+  det_pred_date <- predict(model, type = "det", newdata = new_data_date)
+
+  p_date <- ggplot(det_pred_date, aes(x = date_seq_calendar, y = Predicted)) +
+    geom_line(size = 1.2, color = "#0072B2") +
+    geom_ribbon(aes(ymin = lower, ymax = upper),
+                alpha = 0.2, fill = "#0072B2") +
+    labs(
+      x = "",
+      y = ""
+      #title = paste0(species_name, " Detection Probability vs. Date")
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1)
+    ) +
+    scale_x_date(date_labels = "%b %d", date_breaks = "1 week") +
+    theme_minimal(base_size = 14) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  ggsave(
+    filename = file.path(out_dir, paste0(species_code, "_Detection_vs_Date_nolabel.png")),
+    plot = p_date,
+    width = 8, height = 5, dpi = 300
+  )
+
+  #---------------------------------------------------------
+  # 3. TIME effect
+  #---------------------------------------------------------
+  time_seq_scaled <- seq(
+    min(umf@obsCovs$time, na.rm = TRUE),
+    max(umf@obsCovs$time, na.rm = TRUE),
+    length.out = 100
+  )
+
+  time_seq_real <- time_seq_scaled * time_sd + time_mean
+
+  fixed_date_scaled <- mean(umf@obsCovs$date, na.rm = TRUE)
+
+  new_data_time <- data.frame(
+    time = time_seq_scaled,
+    `I(time^2)` = time_seq_scaled^2,
+    date = fixed_date_scaled,
+    `I(date^2)` = fixed_date_scaled^2
+  )
+
+  det_pred_time <- predict(model, type = "det", newdata = new_data_time)
+
+  p_time <- ggplot(det_pred_time, aes(x = time_seq_real, y = Predicted)) +
+    geom_line(size = 1.2, color = "#009E73") +
+    geom_ribbon(aes(ymin = lower, ymax = upper),
+                alpha = 0.2, fill = "#009E73") +
+    labs(
+      x = "",
+      y = ""
+    #  title = paste0(species_name, " Detection Probability vs. Time")
+    ) +
+    scale_x_continuous(
+      breaks = pretty(time_seq_real, n = 5),
+      labels = function(x) {
+        h <- floor(x)
+        m <- round((x - h) * 60)
+        sprintf("%02d:%02d", h, m)
+      }
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1)
+    ) +
+    theme_minimal(base_size = 14)
+
+  ggsave(
+    filename = file.path(out_dir, paste0(species_code, "_Detection_vs_Time_nolabel.png")),
+    plot = p_time,
+    width = 8, height = 5, dpi = 300
+  )
+
+  invisible(list(date_plot = p_date, time_plot = p_time))
+}
+
+library(tibble)
+
+species_tbl <- tibble(
+  species_code = c(
+    "AMBI",
+    "AMCO",
+    "BCNH",
+    "COGA", 
+    #"KIRA", 
+    "MAWR", 
+    "PBGR",
+    "SWSP", 
+    "SORA", 
+    "VIRA", 
+    "YHBL", 
+    "LEBI"
+  ),
+  species_name = c("American Bittern", 
+                   "American Coot", 
+                   "Black-crowned Night-heron",
+                   "Common Gallinule", 
+                   #"King Rail", 
+                   "Marsh Wren", 
+                   "Pied-billed Grebe", 
+                   "Swamp Sparrow", 
+                   "Sora",
+                   "Virginia Rail", 
+                   "Yellow-headed Blackbird", 
+                   "Least Bittern"
+  ),
+  umf = list(
+    AMBI.umf, 
+    AMCO.umf, 
+    BCNH.umf, 
+    COGA.umf, 
+    #KIRA.umf,
+    MAWR.umf, 
+    PBGR.umf, 
+    SWSP.umf, 
+    SORA.umf, 
+    VIRA.umf, 
+    YHBL.umf, 
+    LEBI.umf
+  ),
+  model = list(
+    ambi.a, 
+    amco.a, 
+    bcnh.a, 
+    coga.a, 
+    #kira.a,
+    mawr.a, 
+    pbgr.a, 
+    swsp.a, 
+    sora.a, 
+    vira.a, 
+    yhbl.a, 
+    lebi.a
+  )
+)
+
+plot_results <- purrr::pmap(
+  species_tbl,
+  function(species_code, species_name, umf, model) {
+    plot_det_covariates(
+      umf = umf,
+      model = model,
+      species_code = species_code,
+      species_name = species_name,
+      dates_orig = dates.orig,
+      times_orig = times.orig,
+      out_dir = "E:/Documents/Audubon/AGL/ARU/Occupancy/Results_Covariates_ARU"
+    )
+  }
+)
+
+
+```
+
+
+
+

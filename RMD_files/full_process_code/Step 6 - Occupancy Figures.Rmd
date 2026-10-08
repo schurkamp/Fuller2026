@@ -1,0 +1,790 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Load required libraries
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(kableExtra)
+library(data.table)
+library(plyr)                                                 
+library(readr)
+library(ggh4x)
+library(ggplot2)
+library(unmarked)
+library(AICcmodavg)
+library(ggtext)
+```
+
+```{r}
+# STEP 6. Create Occupancy Figures
+
+# Specify input filepaths: 
+
+  # Results_SiteOcc output folders from Step 4 and 5 Occupancy analyses
+  # ARU occupancy
+  aru_AnnualOcc_filepath <- "D:/Documents/Audubon/AGL/ARU/Occupancy/Results_AnnualOcc"
+  # PC occupancy
+  pc_AnnualOcc_filepath <- "D:/Documents/Audubon/AGL/ARU/Occupancy/Results_AnnualOcc_PC"
+  
+  # ARU occupancy
+  aru_SiteOcc_filepath <- "D:/Documents/Audubon/AGL/ARU/Occupancy/Results_SiteOcc"
+  # PC occupancy
+  pc_SiteOcc_filepath <- "D:/Documents/Audubon/AGL/ARU/Occupancy/Results_SiteOcc_PC"
+```
+
+```{r}
+
+################################################################################ 
+# 1. Compare average occupancy of species (MAWR and SWSP) 
+################################################################################ 
+# Function to read and label data
+read_occ_data <- function(path, source_label, pattern) {
+  files <- list.files(path, pattern, full.names = TRUE)
+  bind_rows(lapply(files, function(file) {
+    dat <- read_csv(file)
+    species <- str_extract(basename(file), "^[^_]+")  # Extract species from filename
+    dat %>%
+      mutate(Species = species,
+             Source = source_label)
+  }))
+}
+
+# Read in ARU and PC datasets
+aru_data <- read_occ_data(aru_AnnualOcc_filepath, "ARU", "_occ_thru24.csv")
+pc_data  <- read_occ_data(pc_AnnualOcc_filepath, "PC", "_occ_thru24.csv")
+
+
+# Combine and prepare
+combined <- bind_rows(aru_data, pc_data) %>%
+  dplyr::filter(Species %in% c("MAWR", "SWSP", "SORA")) %>%
+  dplyr::mutate(
+    Species = factor(Species, levels = c("MAWR", "SWSP", "SORA"))
+  ) %>%
+  dplyr::select(Species, Source, year, means, stanerror, lowerci, upperci)
+
+mocc_data <- combined %>%
+  pivot_wider(names_from = Source, values_from = means) %>%
+  pivot_longer(cols = c(ARU, PC), names_to = "Source", values_to = "means") %>%
+  drop_na(means)
+
+mocc_data$year <- factor(mocc_data$year)  # Ensure year is treated as categorical
+
+mocc_species_comp_fl <- ggplot(
+  mocc_data,
+  aes(x = as.numeric(as.character(year)), y = means, color = Source, group = Source)
+) +
+
+  # CI bars
+  geom_errorbar(
+    aes(
+      ymin = pmax(0, lowerci),
+      ymax = pmin(1, upperci)
+    ),
+    width = 0,
+    size = 1,
+    alpha = 0.6
+  ) +
+
+  # trend lines
+  geom_line(linetype = 2, size = 1.2) +
+
+  # points
+  geom_point(size = 2.5, shape = 21, stroke = 1.2, fill = "white") +
+  #geom_point(
+  #  aes(fill = Source),   # fill instead of color
+  #  color = "black",      # outline
+  #  size = 2.5,
+  #  shape = 21,
+  #  stroke = 1.2
+  #) +
+  
+  # facet layout: species rows, method columns
+  facet_grid(
+    Species ~ Source,
+    labeller = labeller(
+      Species = c(
+        "MAWR" = "Marsh Wren",
+        "SWSP" = "Swamp Sparrow",
+        "SORA" = "Sora"
+      )
+  ),
+  switch = "y"
+  ) +
+
+  # colors
+  scale_color_manual(
+    values = c("ARU" = "#F8766D", "PC" = "#00BFC4"),
+    name = "Survey Type"
+  ) +
+    
+  # axes
+  #scale_y_continuous(limits = c(0, 1)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    position = "right"
+  ) +
+  theme(
+    strip.placement = "outside",
+    strip.position = "left"
+  ) +
+  scale_x_continuous(
+  breaks = as.numeric(as.character(unique(mocc_data$year)))
+) +
+
+  labs(
+    title = "Occupancy Trends ± CI by Species and Survey Type",
+    x = "Year",
+    y = "Occupancy probability"
+  ) +
+
+  theme_classic(base_size = 14) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      strip.placement = "outside",
+      strip.position = "left",
+      legend.position = "top",
+      panel.grid.minor = element_blank()
+    )
+mocc_species_comp_fl
+
+# Save plot
+ggsave("D:/Documents/Audubon/AGL/ARU/Occupancy/Results_Figs_Comparison/mocc_species_comp_fl_classic.png", plot = mocc_species_comp_fl,
+       width = 8, height = 8, dpi = 300, units = "in")
+
+################################################################################  
+# Compare average occupancy of species by Route
+################################################################################ 
+
+# Read in ARU and PC datasets
+aru_data_r <- read_occ_data(aru_SiteOcc_filepath, "ARU", "_occ_output_2024.csv") %>%
+  dplyr::select(Year, Route, mocc, mean_se, Species, Source)
+pc_data_r  <- read_occ_data(pc_SiteOcc_filepath, "PC", "_occ_output_2024.csv") %>%
+  dplyr::select(Year, Route, mocc, mean_se, Species, Source)
+
+species_list <- c("MAWR", "SWSP", "SORA")
+
+# Combine and prepare
+mocc_data_r <- bind_rows(aru_data_r, pc_data_r) %>%
+  filter(Species %in% species_list) 
+
+species_occ_comp <- function(species_code, species_name, data) {
+  data <- data %>%
+    filter(Species == species_code)
+  
+  data$Route <- as.factor(data$Route)
+  data$Year <- as.factor(data$Year)
+  
+  mocc_comp <- ggplot(data, aes(x = Year, y = mocc, color = Source, group = Source)) +
+  geom_errorbar(
+    aes(
+      ymin = pmax(0, mocc - mean_se),
+      ymax = pmin(1, mocc + mean_se)
+    ),
+    position = position_dodge(width = 0.5),
+    width = 0.2
+  ) +
+  geom_point(size = 3, position = position_dodge(width = 0.5)) +
+  
+  facet_wrap(~ Route, ncol = 4) +
+  scale_color_manual(
+    values = c("ARU" = "#F8766D", "PC" = "#00BFC4"),
+    name = "Survey Type"
+  ) +
+  labs(
+    title = paste("Mean", species_name, " Occupancy ± SE by Route, Year, and Survey Type"),
+    x = "Year",
+    y = "Mean Occupancy"
+  ) +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_grey(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "top"
+  )
+  
+}
+
+# Run function on species with occupancy data for both ARUs and PCs
+mocc_mawr_comp <- species_occ_comp("MAWR", "Marsh Wren", mocc_data_r)
+mocc_swsp_comp <- species_occ_comp("SWSP", "Swamp Sparrow", mocc_data_r)
+mocc_sora_comp <- species_occ_comp("SORA", "Sora", mocc_data_r)
+
+# Save plots
+ggsave("D:/Documents/Audubon/AGL/ARU/Occupancy/Results_Figs_Comparison/mocc_mawr_comp.png", plot = mocc_mawr_comp,
+       width = 10, height = 10, dpi = 300, units = "in")
+ggsave("D:/Documents/Audubon/AGL/ARU/Occupancy/Results_Figs_Comparison/mocc_swsp_comp.png", plot = mocc_swsp_comp,
+       width = 10, height = 10, dpi = 300, units = "in")
+ggsave("D:/Documents/Audubon/AGL/ARU/Occupancy/Results_Figs_Comparison/mocc_sora_comp.png", plot = mocc_sora_comp,
+       width = 10, height = 10, dpi = 300, units = "in")
+
+
+################################################################################  
+# Plot ARU average occupancy by species
+################################################################################
+# KEEP: AMBI, AMCO, BWTE, COGA, MAWR, PBGR, SWSP, SORA, VIRA, YHBL
+aru_only_s <- aru_data %>%
+    mutate(CommonName = case_when(
+    Species == "LEBI"~"Least Bittern",
+    Species == "MAWR"~"Marsh Wren",
+    Species == "SORA"~"Sora",
+    Species == "SWSP"~"Swamp Sparrow",
+    Species == "VIRA"~"Virginia Rail",
+    Species == "BWTE"~"Blue-winged Teal",
+    Species == "YHBL"~"Yellow-headed Blackbird",
+    Species == "BCNH"~"Black-crowned Night Heron",
+    Species == "KIRA"~"King Rail",
+    Species == "YCNH"~"Yellow-crowned Night Heron",
+    Species == "LBHE"~"Little Blue Heron",
+    Species == "BLTE"~"Black Tern",
+    Species == "PBGR"~"Pied-billed Grebe",
+    Species == "AMBI"~"American Bittern",
+    Species == "COGA"~"Common Gallinule",
+    Species == "AMCO"~"American Coot")) %>%
+  filter(Species %in% c("AMBI", 
+                        #"AMCO",
+                        "BCNH",
+                        "BWTE",
+                        "COGA", 
+                        #"KIRA", 
+                        #"LEBI", 
+                        "MAWR", 
+                        "PBGR", 
+                        "SWSP", 
+                        "SORA", 
+                        "VIRA",
+                        "YHBL"))
+aru_only_s$year <- as.factor(aru_only_s$year) 
+
+mocc_species_aru <- ggplot(aru_only_s, aes(x = year, y = means, color = year)) +
+  geom_errorbar(aes(ymin=lowerci, ymax=upperci),
+                    size=1.1,width=0,color=alpha("#4682B4",0.6))+
+      geom_line(aes(group=1), lty=2, color="#4682B4", size=1.3)+
+      geom_point(color="#4682B4",size=2.0, shape=21, stroke=1.3,fill="white")+
+      scale_y_continuous(limits=c(0,1))+
+  #coord_cartesian(ylim = c(0, 1)) +
+  #geom_point(size = 3, position = position_dodge(width = 0.5)) +
+  facet_wrap(~ CommonName, ncol = 3, scales = "free_y") +  # adjust ncol as desired
+  #scale_color_manual(
+  #  values = c("2023" = "#F98B83", "2024" = "#C71709"),
+  #  name = "Year"
+  #) +
+  labs(
+    title = "Mean Occupancy ± CI by Species and Year",
+    x = "Year",
+    y = "Mean Occupancy"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "top"
+  )
+mocc_species_aru
+ggsave("D:/Documents/Audubon/AGL/ARU/Occupancy/Results_Figs/mocc_species_aru_classic.png", plot = mocc_species_aru,
+       width = 10, height = 10, dpi = 300, units = "in")
+
+
+```
+```{r}
+# Combine plots
+
+species_names <- c(
+  "AMBI" = "American Bittern",
+  "BCNH" = "Black-crowned Night Heron",
+  "BWTE" = "Blue-winged Teal",
+  "COGA" = "Common Gallinule",
+  "MAWR" = "Marsh Wren",
+  "PBGR" = "Pied-billed Grebe",
+  "SWSP" = "Swamp Sparrow",
+  "SORA" = "Sora",
+  "VIRA" = "Virginia Rail",
+  "YHBL" = "Yellow-headed Blackbird"
+)
+
+plot_data <- bind_rows(aru_data, pc_data) %>%
+  mutate(
+    CommonName = recode(Species, !!!species_names),
+    Source = factor(Source, levels = c("ARU", "PC")),
+    year = as.numeric(as.character(year))
+  ) %>%
+  filter(Species %in% names(species_names)) %>%
+  drop_na(means)
+
+pd <- position_dodge(width = 0.25)
+
+mocc_species_combined <- ggplot(
+  plot_data,
+  aes(x = year, y = means, color = Source, group = Source)
+) +
+  geom_errorbar(
+    aes(
+      ymin = pmax(0, lowerci),
+      ymax = pmin(1, upperci)
+    ),
+    width = 0.08,
+    linewidth = 1.1,
+    size = 0.8,
+    alpha = 0.7,
+    position = pd
+  ) +
+  geom_line(
+    linetype = 2,
+    linewidth = 1.5,
+    size = 0.9,
+    position = pd
+  ) +
+  geom_point(
+    #aes(fill = Source),
+    size = 2.8,
+    shape = 21,
+    stroke = 1.2,
+    fill = "white",
+    position = pd
+  ) +
+  facet_wrap(~ CommonName, ncol = 3) +
+  scale_color_manual(
+    values = c("ARU" = "#F8766D", "PC" = "#00BFC4"),
+    name = "Survey type"
+  ) +
+  scale_y_continuous(
+  limits = c(0, 1)
+) +
+  scale_x_continuous(breaks = sort(unique(plot_data$year))) +
+  labs(
+    title = "Mean Occupancy ± CI by Species, Year, and Survey Type",
+    x = "Year",
+    y = "Mean Occupancy"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "top"
+  )
+
+mocc_species_combined
+
+ggsave("D:/Documents/Audubon/AGL/ARU/Occupancy/Results_Figs/mocc_species_combined_classic.png", plot = mocc_species_combined,
+       width = 10, height = 10, dpi = 300, units = "in")
+```
+
+
+
+```{r}
+# Occupancy summaries
+pc_data %>%
+  dplyr::group_by(Species) %>%
+  dplyr::summarize(avg_occ = mean(means)) %>%
+  dplyr::arrange(desc(avg_occ))
+aru_data %>%
+  dplyr::group_by(Species) %>%
+  dplyr::summarize(avg_occ = mean(means)) %>%
+  dplyr::arrange(desc(avg_occ))
+
+```
+
+
+```{r}
+library(unmarked)
+library(dplyr)
+library(purrr)
+library(tibble)
+library(ggplot2)
+
+#------------------------------------------------------------
+# File paths
+#------------------------------------------------------------
+
+aru_model_dir <- "D:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles"
+pc_model_dir  <- "D:/Documents/Audubon/AGL/ARU/Occupancy/Results_OC_ModelFiles_PC"
+
+aru_cov_path <- "D:/Documents/Audubon/AGL/ARU/Occupancy/Results_Covariates_ARU/ARU_covariates.rds"
+pc_cov_path  <- "D:/Documents/Audubon/AGL/ARU/Occupancy/Results_Covariates_PC/PC_covariates.rds"
+
+out_dir <- "D:/Documents/Audubon/AGL/ARU/Occupancy/Results_Figs_Comparison"
+
+#------------------------------------------------------------
+# Species to compare
+#------------------------------------------------------------
+
+species_tbl <- tibble(
+  species_code = c("MAWR", "SWSP", "SORA"),
+  species_name = c("Marsh Wren", "Swamp Sparrow", "Sora")
+)
+
+#------------------------------------------------------------
+# Helper: load .Rda model object
+#------------------------------------------------------------
+
+load_rda_object <- function(path) {
+  e <- new.env()
+  nm <- load(path, envir = e)
+  e[[nm[1]]]
+}
+
+#------------------------------------------------------------
+# Helper: load species-specific UMFs and models
+#------------------------------------------------------------
+
+load_species_data <- function(species_code) {
+  
+  ARU_covs <- readRDS(aru_cov_path)
+  PC_covs  <- readRDS(pc_cov_path)
+  
+  aru_umf <- readRDS(file.path(aru_model_dir, paste0(species_code, ".umf.rds")))
+  pc_umf  <- readRDS(file.path(pc_model_dir,  paste0(species_code, ".umf.rds")))
+  
+  aru_model <- load_rda_object(
+    file.path(aru_model_dir, paste0(species_code, "_occ_OC.Rda"))
+  )
+  
+  pc_model <- load_rda_object(
+    file.path(pc_model_dir, paste0(species_code, "_occ_OC.Rda"))
+  )
+  
+  list(
+    aru_umf = aru_umf,
+    pc_umf = pc_umf,
+    aru_model = aru_model,
+    pc_model = pc_model,
+    dates_aru = ARU_covs$dates_aru,
+    times_aru = ARU_covs$times_aru,   # ARU species-specific list
+    dates_pc  = PC_covs$dates_pc,
+    times_pc  = PC_covs$times_pc      # PC shared matrix
+  )
+}
+
+#------------------------------------------------------------
+# Helpers
+#------------------------------------------------------------
+
+det_terms <- function(model) {
+  all.vars(model@formula[[2]])
+}
+
+has_quadratic <- function(term, terms_vec) {
+  paste0("I(", term, "^2)") %in% terms_vec
+}
+
+get_scale_param <- function(umf, dates_orig = NULL, times_orig = NULL) {
+  
+  date_mean <- attr(umf, "date_mean")
+  date_sd   <- attr(umf, "date_sd")
+  time_mean <- attr(umf, "time_mean")
+  time_sd   <- attr(umf, "time_sd")
+  
+  if (is.null(date_mean)) date_mean <- mean(dates_orig, na.rm = TRUE)
+  if (is.null(date_sd))   date_sd   <- sd(dates_orig, na.rm = TRUE)
+  if (is.null(time_mean)) time_mean <- mean(times_orig, na.rm = TRUE)
+  if (is.null(time_sd))   time_sd   <- sd(times_orig, na.rm = TRUE)
+  
+  list(
+    date_mean = date_mean,
+    date_sd = date_sd,
+    time_mean = time_mean,
+    time_sd = time_sd
+  )
+}
+
+#------------------------------------------------------------
+# Helper: build prediction data
+#------------------------------------------------------------
+
+build_det_pred <- function(
+  umf,
+  model,
+  source_label,
+  dates_orig = NULL,
+  times_orig = NULL,
+  covariate = c("date", "time"),
+  n = 100,
+  origin_date = "2024-01-01"
+) {
+  
+  covariate <- match.arg(covariate)
+  terms_vec <- det_terms(model)
+  
+  # Skip if selected model does not include focal covariate
+  if (!covariate %in% terms_vec) return(NULL)
+  
+  scales <- get_scale_param(
+  umf = umf,
+  dates_orig = dates_orig,
+  times_orig = times_orig
+)
+
+  date_mean <- scales$date_mean
+  date_sd   <- scales$date_sd
+  time_mean <- scales$time_mean
+  time_sd   <- scales$time_sd
+  
+  focal_scaled <- seq(
+    min(umf@obsCovs[[covariate]], na.rm = TRUE),
+    max(umf@obsCovs[[covariate]], na.rm = TRUE),
+    length.out = n
+  )
+  
+  new_data <- data.frame(x = seq_along(focal_scaled))[, FALSE]
+  new_data[[covariate]] <- focal_scaled
+  
+  if (has_quadratic(covariate, terms_vec)) {
+    new_data[[paste0("I(", covariate, "^2)")]] <- focal_scaled^2
+  }
+  
+  if (covariate == "date") {
+    
+    x_real <- focal_scaled * date_sd + date_mean
+    
+    if ("time" %in% terms_vec) {
+      fixed_time <- median(umf@obsCovs$time, na.rm = TRUE)
+      new_data$time <- fixed_time
+      
+      if (has_quadratic("time", terms_vec)) {
+        new_data[["I(time^2)"]] <- fixed_time^2
+      }
+    }
+    
+  } else {
+    
+    x_real <- focal_scaled * time_sd + time_mean
+    
+    if ("date" %in% terms_vec) {
+      fixed_date <- median(umf@obsCovs$date, na.rm = TRUE)
+      new_data$date <- fixed_date
+      
+      if (has_quadratic("date", terms_vec)) {
+        new_data[["I(date^2)"]] <- fixed_date^2
+      }
+    }
+  }
+  
+  pred <- predict(model, type = "det", newdata = new_data)
+  
+  pred %>%
+    mutate(
+      x = x_real,
+      source = source_label,
+      covariate = covariate
+    )
+}
+
+#------------------------------------------------------------
+# Helper: Summarize Models
+#------------------------------------------------------------
+summarize_det_model <- function(model, species_name, source_label) {
+  
+  # Detection formula terms
+  terms_vec <- all.vars(model@formula[[2]])
+  formula_txt <- deparse(model@formula[[2]])
+  
+  # Detection coefficients
+  coefs <- coef(model, type = "det")
+  coef_names <- names(coefs)
+  
+  date_coef_name <- grep("date", coef_names, value = TRUE)
+  time_coef_name <- grep("time", coef_names, value = TRUE)
+  
+  date_linear_name <- grep("date", date_coef_name, value = TRUE)[1]
+  time_linear_name <- grep("time", time_coef_name, value = TRUE)[1]
+  
+  has_date <- "date" %in% terms_vec
+  has_time <- "time" %in% terms_vec
+  
+  has_date_quad <- grepl("I\\(date\\^2\\)", formula_txt)
+  has_time_quad <- grepl("I\\(time\\^2\\)", formula_txt)
+  
+  date_beta <- if (has_date && length(date_linear_name) > 0) coefs[date_linear_name] else NA_real_
+  time_beta <- if (has_time && length(time_linear_name) > 0) coefs[time_linear_name] else NA_real_
+  
+  tibble(
+    species = species_name,
+    source = source_label,
+    det_formula = formula_txt,
+    has_date = has_date,
+    has_date_quad = has_date_quad,
+    has_time = has_time,
+    has_time_quad = has_time_quad,
+    date_beta = date_beta,
+    time_beta = time_beta,
+    
+    date_effect = case_when(
+      !has_date ~ "not included",
+      has_date_quad ~ "quadratic / unimodal",
+      date_beta > 0 ~ "monotonic increasing",
+      date_beta < 0 ~ "monotonic decreasing",
+      TRUE ~ "unclear"
+    ),
+    
+    time_effect = case_when(
+      !has_time ~ "not included",
+      has_time_quad ~ "quadratic / unimodal",
+      time_beta > 0 ~ "monotonic increasing",
+      time_beta < 0 ~ "monotonic decreasing",
+      TRUE ~ "unclear"
+    )
+  )
+}
+
+#------------------------------------------------------------
+# Build all predictions
+#------------------------------------------------------------
+
+all_preds <- list()
+
+for (i in seq_len(nrow(species_tbl))) {
+  
+  sp_code <- species_tbl$species_code[i]
+  sp_name <- species_tbl$species_name[i]
+  
+  dat <- load_species_data(sp_code)
+  
+  for (cov in c("date", "time")) {
+    
+    pred_aru <- build_det_pred(
+    umf = dat$aru_umf,
+    model = dat$aru_model,
+    source_label = "ARU",
+    dates_orig = dat$dates_aru,
+    times_orig = dat$times_aru[[sp_code]],
+    covariate = cov
+  )
+  
+  pred_pc <- build_det_pred(
+    umf = dat$pc_umf,
+    model = dat$pc_model,
+    source_label = "PC",
+    dates_orig = dat$dates_pc,
+    times_orig = dat$times_pc,
+    covariate = cov
+  )
+    
+    preds <- bind_rows(pred_aru, pred_pc)
+    
+    if (nrow(preds) > 0) {
+      preds <- preds %>%
+        mutate(
+          species = sp_name,
+          species_code = sp_code
+        )
+      
+      all_preds[[length(all_preds) + 1]] <- preds
+    }
+  }
+}
+
+plot_df <- bind_rows(all_preds)
+
+
+#------------------------------------------------------------
+# Reorder species and restrict to central 95% observed ranges
+#------------------------------------------------------------
+
+species_order <- c("Marsh Wren", "Swamp Sparrow", "Sora")
+
+plot_df <- plot_df %>%
+  mutate(
+    species = factor(species, levels = species_order)
+  )
+
+#------------------------------------------------------------
+# Plot: ARU and PC detection probabilities
+#------------------------------------------------------------
+
+detprob_comp_all <- ggplot(plot_df, aes(x = x, y = Predicted, color = source)) +
+  geom_line(linewidth = 1.1) +
+  geom_ribbon(
+    aes(ymin = lower, ymax = upper, fill = source),
+    alpha = 0.2,
+    color = NA
+  ) +
+  facet_grid(
+    species ~ covariate,
+    scales = "free_x",
+    switch = "y",
+    labeller = labeller(
+      covariate = c(
+        date = "Date",
+        time = "Time"
+      )
+    )
+  ) +
+  scale_color_manual(
+    name = "Survey Method",
+    values = c("ARU" = "#F8766D", "PC" = "#00BFC4")
+  ) +
+  scale_fill_manual(
+    name = "Survey Method",
+    values = c("ARU" = "#F8766D", "PC" = "#00BFC4")
+  ) +
+  scale_x_continuous(
+    breaks = function(x) pretty(x, n = 6),
+    labels = function(x) {
+      if (max(x, na.rm = TRUE) > 50) {
+        format(as.Date(x - 1, origin = "2024-01-01"), "%b %d")
+      } else {
+        h <- floor(x)
+        m <- round((x - h) * 60)
+        sprintf("%02d:%02d", h, m)
+      }
+    }
+  ) +
+  scale_y_continuous(
+  position = "right",
+  limits = c(0, 1)
+) +
+  #coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = NULL,
+    y = "Detection probability",
+    title = "Detection Probability by Date or Time and Survey Method"
+  ) +
+  guides(
+    fill = "none",
+    color = guide_legend(override.aes = list(fill = NA))
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    strip.placement = "outside",
+    strip.position = "left",
+    legend.position = "top",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+detprob_comp_all
+
+ggsave(
+  filename = file.path(out_dir, "detprob_comp_all.png"),
+  plot = detprob_comp_all,
+  width = 10,
+  height = 8,
+  dpi = 300,
+  units = "in"
+)
+
+#------------------------------------------------------------
+# Plot: ARU and PC detection probabilities
+#------------------------------------------------------------
+model_summary <- purrr::map_dfr(seq_len(nrow(species_tbl)), function(i) {
+  
+  sp_code <- species_tbl$species_code[i]
+  sp_name <- species_tbl$species_name[i]
+  
+  dat <- load_species_data(sp_code)
+  
+  bind_rows(
+    summarize_det_model(dat$aru_model, sp_name, "ARU"),
+    summarize_det_model(dat$pc_model,  sp_name, "PC")
+  )
+})
+
+model_summary
+```
+
+
+
+
+

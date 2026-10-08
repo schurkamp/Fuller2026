@@ -1,0 +1,500 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Load required libraries
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(kableExtra)
+library(data.table)
+library(plyr)                                                 
+library(readr)
+```
+
+```{r}
+# STEP 1. Organization of BirdNET Analyzer Output for Validation
+
+# In BirdNET Analyzer - make sure to save as a Raven txt file
+  # Set confidence threshold to 0.1, all other settings at default
+  # Use marsh bird txt file species list
+
+# Specify input filepaths: 
+
+  # Raw BirdNET Analyzer Results 
+  folder_path <- "D:/Documents/Audubon/AGL/ARU/Results/AGL_BirdNET_Raw"
+
+  # Point-matching data to filter out dates overlapping with Point Counts. You will need to create your own depending on your project needs
+  ARU_Match <- read.csv("D:/Documents/Audubon/AGL/ARU/Validation/ARU_Point_Match_v2.csv")
+```
+
+# UPDATES: Fix Goose Pond to be 5:00 instead of 6:00 (minus 1 hour)
+# Filter from 5:00:00 to 9:30:00
+
+```{r}
+################################################    
+# 1. Add Data
+################################################    
+
+  # List all .txt files in the folder
+  file_list <- list.files(path = folder_path, pattern = "\\.txt$", full.names = TRUE)
+  
+  # Step 1: Read all files into a list of dataframes
+  data_list <- lapply(file_list, function(file) {
+    tryCatch({
+      read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+    }, error = function(e) {
+      message(paste("Skipping file due to read error:", file))
+      return(NULL)
+    })
+  })
+  
+  # Remove any NULLs (files that failed to read)
+  data_list <- Filter(Negate(is.null), data_list)
+  
+  # Step 2: Get the full set of unique column names
+  all_columns <- unique(unlist(lapply(data_list, names)))
+  
+  # Step 3: Standardize each dataframe to have the same columns
+  data_list <- lapply(data_list, function(df) {
+    missing_cols <- setdiff(all_columns, names(df))
+    for (col in missing_cols) df[[col]] <- NA
+    df <- df[all_columns]  # reorder columns to match
+    return(df)
+  })
+  
+  # Step 4: Combine safely
+  combined_data <- bind_rows(data_list) %>%
+    distinct() %>%
+    mutate(
+      filename = basename(Begin.Path),
+      ARU = str_remove(filename, "_\\d{8}_\\d{6}\\.wav$"),
+      date = str_extract(filename, "\\d{8}")
+    )
+  
+################################################      
+# 2. Remove matching dates with Point Counts
+################################################    
+  # Add ARU_Match data
+
+  combined_data$date <- as.integer(combined_data$date)
+  
+  filtered_df <- combined_data %>%
+      dplyr::anti_join(ARU_Match, by = c("ARU", "date"))
+
+
+# 3. Mark survey periods and filter to those time periods
+# also update all of CMBM data to shift back 1 hour (in eastern instead of central time)
+  
+  # Survey filter function
+survey_filter <- function(input_df, reference_df) {
+  
+  shift_back_1hr <- c("122", "124", "126", "142", "143", "144", "145", "146") # Locate CMBM sites
+
+    reference_df <- reference_df %>%
+    select(ARU, site, geography)
+  
+  input_df$ARU <- as.character(input_df$ARU)
+  reference_df$ARU <- as.character(reference_df$ARU)
+  
+  input_df <- input_df %>%
+    left_join(reference_df, by = "ARU") %>%
+    tidyr::separate(
+      date,
+      into = c("year", "month_day"),
+      sep = 4,
+      remove = FALSE
+    ) %>%
+    mutate(
+      month_day = as.integer(month_day),
+      year = as.integer(year),
+      survey_num = case_when(
+        geography == "North"   & month_day >= 0515 & month_day <= 0531 ~ "1",
+        geography == "North"   & month_day >= 0601 & month_day <= 0614 ~ "2",
+        geography == "North"   & month_day >= 0615 & month_day <= 0630 ~ "3",
+        geography == "Central" & month_day >= 0501 & month_day <= 0514 ~ "1",
+        geography == "Central" & month_day >= 0515 & month_day <= 0531 ~ "2",
+        geography == "Central" & month_day >= 0601 & month_day <= 0615 ~ "3",
+        geography == "South"   & month_day >= 0415 & month_day <= 0430 ~ "1",
+        geography == "South"   & month_day >= 0501 & month_day <= 0514 ~ "2",
+        geography == "South"   & month_day >= 0515 & month_day <= 0531 ~ "3",
+        TRUE ~ NA_character_
+      )
+    )
+  
+  filtered_df <- input_df %>%
+    filter(!is.na(survey_num)) %>%
+    distinct() %>%
+    dplyr::mutate(
+    raw_time = stringr::str_extract(Begin.Path, "(?<=_)\\d+(?=\\.wav)"),
+    
+    raw_time = if_else(
+      stringr::str_length(raw_time) == 4,
+      paste0(raw_time, "0"),
+      raw_time
+    ),
+    
+    raw_time = stringr::str_pad(raw_time, width = 6, pad = "0"),
+    
+    base_time = as.POSIXct(
+      stringr::str_replace(
+        raw_time,
+        "(\\d{2})(\\d{2})(\\d{2})",
+        "\\1:\\2:\\3"
+      ),
+      format = "%H:%M:%S",
+      tz = "UTC"
+    ),
+    
+    StartTime_POSIX = base_time + as.numeric(`File.Offset..s.`),
+    
+    StartTime_POSIX = StartTime_POSIX - if_else(
+      ARU %in% shift_back_1hr,
+      3600,
+      0
+    ),
+    
+    StartTime = format(StartTime_POSIX, "%H:%M:%S")
+  ) %>%
+    dplyr::filter(
+      StartTime >= "05:00:00",
+      StartTime <= "08:30:00"
+    )
+  
+  return(filtered_df)
+}
+
+  
+  # Run survey filter function
+  survey_filtered_df <- survey_filter(filtered_df, ARU_Match) %>%
+    distinct(across(-c(Selection, Begin.Time..s., End.Time..s.,File.Offset..s.)), .keep_all = TRUE)
+
+  # Ensure target species are the only ones included
+  target_species <- c(
+  "Least Bittern",
+  "Sora",
+  "Virginia Rail",
+  "Common Gallinule",
+  "Pied-billed Grebe",
+  "King Rail",
+  "American Bittern",
+  "American Coot",
+  "Black-crowned Night-Heron",
+  "Black Tern",
+  "Blue-winged Teal",
+  "Little Blue Heron",
+  "Marsh Wren",
+  "Swamp Sparrow",
+  "Yellow-crowned Night-Heron",
+  "Yellow-headed Blackbird"
+)
+
+  # Filter dataset
+  survey_filtered_df <- survey_filtered_df %>%
+    filter(Common.Name %in% target_species)
+  
+  unique(survey_filtered_df$Common.Name)
+
+################################################    
+# 3. Filter 4 observations per day/species/site
+################################################    
+  
+  # Get median confidence per group-date
+  med_conf_df <- survey_filtered_df %>%
+    dplyr::group_by(ARU, survey_num, Common.Name, date) %>%
+    dplyr::summarize(median_confidence = median(Confidence, na.rm = TRUE), .groups = "drop")
+  
+  # Top 5 dates per survey
+  top_5_dates <- med_conf_df %>%
+    dplyr::group_by(ARU, survey_num, Common.Name) %>%
+    slice_max(order_by = median_confidence, n = 5, with_ties = FALSE) %>%
+    ungroup() 
+  
+  # Filter full data to those top 5 dates
+  filtered_df <- survey_filtered_df %>%
+    semi_join(top_5_dates, by = c("ARU", "survey_num", "Common.Name", "date")) 
+  
+  # From filtered data, take top 4 confidence rows per group-date
+  filtered_top_rows <- filtered_df %>%
+    dplyr::group_by(ARU, survey_num, Common.Name, date) %>%
+    slice_max(order_by = Confidence, n = 4, with_ties = FALSE) %>%
+    ungroup() 
+  
+  # Sort final result 
+  final_df <- filtered_top_rows %>%
+    arrange(ARU, Common.Name, date) %>%
+    select(Begin.Path, Begin.Time..s., End.Time..s., File.Offset..s., Common.Name, Confidence, site, ARU, date, survey_num, StartTime) 
+  
+  # Update final columns
+  final_df$Verify <- ""
+  final_df$Notes <- ""
+  colnames(final_df) <- c('Begin Path', 'Begin Time (s)', 'End Time (s)', 'File Offset (s)', 'Common Name', 'Confidence', 'Site', 'ARU', 'Date', 'Survey', 'StartTime', 'Verify', 'Notes')
+  
+final_df$Year <- substr(final_df$Date, 1, 4)
+library(hms)
+final_df %>%
+  dplyr::group_by(ARU, Year) %>%
+  dplyr::summarise(
+    min_time = format(
+      min(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    ),
+    max_time = format(
+      max(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    )
+  ) %>%
+  dplyr::mutate(
+    duration = as_hms(max_time) - as_hms(min_time),
+    duration_mins = as.numeric(duration, units = "mins"),
+    flag_over_330 = duration_mins > 210
+  ) 
+
+################################################      
+# 4. Save as separate files
+################################################    
+  
+  # Loop through each unique Site
+  unique_sites <- unique(final_df$Site)
+  
+  for (site in unique_sites) {
+    # Subset data for this site
+    site_df <- final_df[final_df$Site == site, ]
+    
+    # Extract unique years for this site
+    years <- unique(site_df$Year)
+    years_str <- paste(years, collapse = "_")
+    
+    # Create a safe filename
+    safe_site <- gsub("[^A-Za-z0-9]", "_", site)
+    file_name <- paste0(
+      "D:/Documents/Audubon/AGL/ARU/Validation/Selection_Tables/final_output_6_8_26_",
+      safe_site, "_", years_str, ".txt"
+    )
+    
+    # Write to tab-delimited .txt file
+    write.table(site_df, file = file_name, sep = "\t", row.names = FALSE, quote = FALSE)
+  }
+ 
+```
+
+```{r}
+# FIXING FILES WITH INCORRECT TIMES
+#__________________________________________________________________
+
+#### Add times helper function
+add_time <- function(input_df) { 
+  input_df %>%  
+    mutate(
+      raw_time = stringr::str_extract(Begin.Path, "(?<=_)\\d+(?=\\.wav)"),
+      raw_time = if_else(stringr::str_length(raw_time) == 4, paste0(raw_time, "0"), raw_time),
+      raw_time = stringr::str_pad(raw_time, width = 6, pad = "0"),
+      base_time = as.POSIXct(
+        stringr::str_replace(raw_time, "(\\d{2})(\\d{2})(\\d{2})", "\\1:\\2:\\3"),
+        format = "%H:%M:%S",
+        tz = "UTC"
+      ),
+      StartTime_POSIX = base_time + as.numeric(`File.Offset..s.`),
+      StartTime_POSIX = if_else(
+        ARU %in% shift_back_1hr,
+        StartTime_POSIX - lubridate::hours(1),
+        StartTime_POSIX
+      ),
+      StartTime = format(StartTime_POSIX, "%H:%M:%S")
+    ) %>%
+    select(-raw_time, -base_time, -StartTime_POSIX)
+}
+
+#__________________________________________________________________
+
+#### Fix CMBM 2024
+cmbm24_revised <- read.table("D:/Documents/Audubon/AGL/ARU/Validation/Selection_Tables/final_output_6_8_26_CMBM_2023_2024.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
+  filter(Year == 2024) 
+
+cmbm24_validated <- read.table(
+  "D:/Documents/Audubon/AGL/ARU/Validation/Verified/cmbm24_ana_st_VALIDATED.txt",
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE
+) %>%
+  # add time to original data for checking
+  add_time() %>%
+  # update to go back 1 hour (CMBM ONLY)
+  mutate(
+    StartTime = format(
+      as.POSIXct(StartTime, format = "%H:%M:%S", tz = "UTC") - hours(1),
+      "%H:%M:%S"
+    )
+  )
+
+unique(cmbm24_validated$StartTime)
+# Columns to compare
+compare_cols <- c("Common.Name", "Confidence", "Date", "Survey", "ARU", "StartTime")
+
+# 1️⃣ Rows in revised but not in validated → to ADD
+rows_to_add <- anti_join(cmbm24_revised, cmbm24_validated, by = compare_cols) %>%
+  mutate(Update_Status = "added")
+
+# 2️⃣ Rows in validated that still exist in revised → to KEEP
+rows_common <- semi_join(cmbm24_validated, cmbm24_revised, by = compare_cols) %>%
+  mutate(Update_Status = "kept")
+
+# 3️⃣ Combine: keep old (preserve Verify & Notes) + add new rows
+cmbm24_validated_updated <- bind_rows(rows_common, rows_to_add)
+
+# Optional: ensure same column order as original + new status column at the end
+cmbm24_validated_updated <- cmbm24_validated_updated %>%
+  select(all_of(names(cmbm24_validated)), Update_Status)
+
+# DOUBLE CHECK TIMES
+cmbm24_validated_updated %>%
+  dplyr::group_by(ARU) %>%
+  dplyr::summarise(
+    min_time = format(
+      min(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    ),
+    max_time = format(
+      max(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    )
+  ) %>%
+  dplyr::mutate(
+    duration = as_hms(max_time) - as_hms(min_time),
+    duration_mins = as.numeric(duration, units = "mins"),
+    flag_over_330 = duration_mins > 210
+  ) 
+# looks great!!!
+
+colnames(cmbm24_validated_updated) <- c('Selection', 'View', 'Channel', 'Begin Time (s)', 'End Time (s)', 'Begin Path', 'File Offset (s)', 'Common Name', 'Confidence', 'Site', 'ARU', 'Date', 'Year', 'Survey', 'Verify', 'Notes', 'Update_Status', 'StartTime')
+
+write.table(cmbm24_validated_updated, file = "D:/Documents/Audubon/AGL/ARU/Validation/Selection_Tables/cmbm24_time_revisions_6_8_2026.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+#__________________________________________________________________
+#### Fix CMBM 2023
+cmbm23_revised <- read.table("D:/Documents/Audubon/AGL/ARU/Validation/Selection_Tables/final_output_6_8_26_CMBM_2023_2024.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
+  filter(Year == 2023) %>%
+  dplyr::mutate(ARU = as.character(ARU))
+
+# txt keeps breaking for some reason and converted to csv
+cmbm23_validated <- read.csv("D:/Documents/Audubon/AGL/ARU/Validation/Verified/ALL_SAM_VALIDATIONS.csv") %>%
+  filter(Site == "CMBM") %>%
+  # add time to original data for checking
+  add_time() %>%
+  # update to go back 1 hour (CMBM ONLY)
+  mutate(
+    StartTime = format(
+      as.POSIXct(StartTime, format = "%H:%M:%S", tz = "UTC") - hours(1),
+      "%H:%M:%S"
+    )
+  )
+# Columns to compare
+compare_cols <- c("Common.Name", "Confidence", "Date", "Survey", "ARU", "StartTime")
+
+# 1️⃣ Rows in revised but not in validated → to ADD
+rows_to_add <- anti_join(cmbm23_revised, cmbm23_validated, by = compare_cols) %>%
+  mutate(Update_Status = "added")
+
+# 2️⃣ Rows in validated that still exist in revised → to KEEP
+rows_common <- semi_join(cmbm23_validated, cmbm23_revised, by = compare_cols) %>%
+  mutate(Update_Status = "kept")
+
+# 3️⃣ Combine: keep old (preserve Verify & Notes) + add new rows
+cmbm23_validated_updated <- bind_rows(rows_common, rows_to_add)
+
+# Optional: ensure same column order as original + new status column at the end
+cmbm23_validated_updated <- cmbm23_validated_updated %>%
+  select(all_of(names(cmbm23_validated)), Update_Status)
+
+# DOUBLE CHECK TIMES
+cmbm23_validated_updated %>%
+  dplyr::group_by(ARU) %>%
+  dplyr::summarise(
+    min_time = format(
+      min(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    ),
+    max_time = format(
+      max(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    )
+  ) %>%
+  dplyr::mutate(
+    duration = as_hms(max_time) - as_hms(min_time),
+    duration_mins = as.numeric(duration, units = "mins"),
+    flag_over_330 = duration_mins > 210
+  ) 
+
+colnames(cmbm23_validated_updated) <- c('Selection', 'View', 'Channel', 'Begin Time (s)', 'End Time (s)', 'Begin Path', 'File Offset (s)', 'Common Name', 'Confidence', 'Site', 'ARU', 'Date', 'Year', 'Survey', 'Verify', 'Notes', 'Update_Status', 'StartTime')
+
+write.table(cmbm23_validated_updated, file = "D:/Documents/Audubon/AGL/ARU/Validation/Selection_Tables/cmbm23_time_revisions_6_8_2026.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+#__________________________________________________________________
+#### Fix WLSE S4A12908 2023
+wlse23_revised <- read.table("D:/Documents/Audubon/AGL/ARU/Validation/Selection_Tables/final_output_6_8_26_WLSE_2023.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
+  dplyr::mutate(ARU = as.character(ARU))
+wlse23_revised$meta_notes <- ""
+
+# txt keeps breaking for some reason and converted to csv
+wlse23_validated <- read.csv("D:/Documents/Audubon/AGL/ARU/Validation/Verified/ALL_SAM_VALIDATIONS.csv") %>%
+  filter(Site == "WLSE") %>%
+  # add time to original data for checking
+  add_time() %>%
+  # update to go back 1 hour (CMBM ONLY)
+  mutate(
+    StartTime = format(
+      as.POSIXct(StartTime, format = "%H:%M:%S", tz = "UTC") - hours(1),
+      "%H:%M:%S"
+    )
+  ) %>%
+  select(-Selection, -View, -Channel, -Scientific.Name)
+# Columns to compare
+compare_cols <- c("Common.Name", "Confidence", "Date", "Survey", "ARU", "StartTime")
+
+# 1️⃣ Rows in revised but not in validated → to ADD
+rows_to_add <- anti_join(wlse23_revised, wlse23_validated, by = compare_cols) %>%
+  dplyr::mutate(Update_Status = "added")
+
+# 2️⃣ Rows in validated that still exist in revised → to KEEP
+rows_common <- semi_join(wlse23_validated, wlse23_revised, by = compare_cols) %>%
+  dplyr::mutate(Update_Status = "kept")
+
+# 3️⃣ Combine: keep old (preserve Verify & Notes) + add new rows
+wlse23_validated_updated <- bind_rows(rows_to_add)
+
+# Optional: ensure same column order as original + new status column at the end
+wlse23_validated_updated <- wlse23_validated_updated %>%
+  dplyr::select(all_of(names(wlse23_validated)), Update_Status)
+
+# DOUBLE CHECK TIMES
+wlse23_validated_updated %>%
+  dplyr::group_by(ARU) %>%
+  dplyr::summarise(
+    min_time = format(
+      min(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    ),
+    max_time = format(
+      max(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    )
+  ) %>%
+  dplyr::mutate(
+    duration = as_hms(max_time) - as_hms(min_time),
+    duration_mins = as.numeric(duration, units = "mins"),
+    flag_over_330 = duration_mins > 210
+  ) 
+
+write.table(wlse23_validated_updated, file = "D:/Documents/Audubon/AGL/ARU/Validation/Selection_Tables/wlse23_time_revisions_6_8_2026.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+#### Fix SMA06018GRAS 2023
+### SAM WILL NEED TO RUN THIS USING THIS CODE
+
+#### Fix CHEBW1 and CHEBW2
+### SAM WILL NEED TO RUN THIS USING THIS CODE
+```
+
+

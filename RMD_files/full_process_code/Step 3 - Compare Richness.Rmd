@@ -1,0 +1,704 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Load required libraries
+
+## organizational functions
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(kableExtra)
+library(data.table)
+library(plyr)                                                 
+library(ggh4x)
+library(purrr)
+
+# improve the import functions for data within repositories
+library(readr)
+library(here)
+
+# graphing functions
+library(ggplot2)
+library(patchwork)
+
+# table functions
+library(flextable)
+library(officer)
+```
+
+
+```{r}
+################################################    
+# Import and Prepare Combined Dataset 
+################################################ 
+
+pc_aru_data <- read.csv("E:/Documents/Audubon/AGL/ARU/Validation/Verified/all_occ_zerofill_4_16_26.csv") %>%
+  # set up funder names (distinct from Project, which is MWADC-derived but not representative of project funding)
+  dplyr::mutate(Funder = case_when(Route == "BIGM" ~ "NFWF/SOGL",
+                               Route == "PETE" ~ "NFWF/SOGL",
+                               Route == "CHEB" ~ "NFWF/SOGL",
+                               Route == "DUNC" ~ "NFWF/SOGL",
+                               TRUE ~ "Indiana DNR"))
+
+# summarize richness (unique BirdCd) by Project, Protocol (ARU or PC), Route, Point
+  # IndivCount = 0 (absent) or present (>1), make sure that unique rows with 0 species show up
+  # also need to summarize richness by combined Protocol (ARU + PC)
+
+# Clarify MWADC formatting: "----" means no species at a site, remove non-focal species
+# Ensure counts are 0/1
+
+# calculate richness for ARU and PC 
+pc_aru_richness <- pc_aru_data %>%
+  filter(!CommonName %in% c("----", "Trumpeter Swan", "Sandhill Crane", "Snowy Egret", "Forster's Tern")) %>%
+  dplyr::filter(IndivCount >=1) %>%
+  dplyr::group_by(Funder, Protocol, Route, Year, Point) %>%
+  dplyr::summarize(Richness = length(unique(BirdCd)))
+  
+# calculate richness for ARU + PC
+both_richness <- pc_aru_data %>%
+  filter(!CommonName %in% c("----", "Trumpeter Swan", "Sandhill Crane", "Snowy Egret", "Forster's Tern")) %>%
+  dplyr::filter(IndivCount >=1) %>%
+  dplyr::group_by(Funder, Route, Point, Year) %>% # exclude Protocol to get combined richness
+  dplyr::summarize(Richness = length(unique(BirdCd))) %>%
+  dplyr::mutate(Protocol = "ARU + PC")
+
+# combine richness of ARU, PC, and ARU + PC
+all_richness_no0 <- rbind(pc_aru_richness, both_richness)
+
+# zero-fill richness summary  
+all_data_plot <- all_richness_no0 %>%
+  dplyr::select(Funder, Point, Protocol, Richness, Route, Year) %>%
+  pivot_wider(names_from = Protocol, values_from = Richness) %>%
+  pivot_longer(cols = c(ARU, PC, `ARU + PC`), names_to = "Protocol", values_to = "Richness") %>%
+  dplyr::mutate(Richness = ifelse(is.na(Richness), 0, Richness)) 
+
+
+```
+
+```{r}
+################################################ 
+# Create Lollipop Plots 
+################################################ 
+    
+# create route index for wrapping
+
+# Function  
+lollipop_rich <- function(data, funder,
+                          show_y_axis_title = TRUE,
+                          show_point_labels = TRUE,   
+                          show_legend = TRUE,
+                          show_x_axis_title = TRUE,
+                          show_title = TRUE)  {
+  
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  
+  # filter by funder if needed
+  if (funder != "all") {
+    data <- data %>%
+      dplyr::filter(Funder == funder)
+  }
+  
+  #---------------------------
+  # Step 1: Wide format
+  #---------------------------
+  segment_data <- data %>%
+    dplyr::select(Funder, Point, Protocol, Richness, Route, Year) %>%
+    pivot_wider(
+      names_from = Protocol,
+      values_from = Richness,
+      values_fill = 0
+    ) %>%
+    dplyr::mutate(
+      equal_richness = ARU == PC,
+      keep_combined = (`ARU + PC` != ARU) & (`ARU + PC` != PC), # change this and add a jitter function so that `ARU + PC` shows up
+      Route = factor(Route, levels = sort(unique(Route)))
+    ) 
+  
+  #---------------------------
+  # Step 2: Plot data
+  #---------------------------
+  plot_data <- segment_data %>%
+    pivot_longer(
+      cols = c(ARU, PC, `ARU + PC`),
+      names_to = "Protocol",
+      values_to = "Richness"
+    ) %>%
+    dplyr::filter(
+      Protocol %in% c("ARU", "PC") |
+      (Protocol == "ARU + PC" & keep_combined)
+    ) %>%
+    dplyr::mutate(
+      Richness_jittered = case_when(
+        equal_richness & Protocol == "ARU" ~ Richness + 0.05,
+        equal_richness & Protocol == "PC"  ~ Richness - 0.05,
+        TRUE ~ Richness
+      )
+    )
+  
+  #---------------------------
+  # Step 3: Segment lines
+  #---------------------------
+  segment_lines <- plot_data %>%
+    dplyr::arrange(Route, Year, Point, Richness) %>%
+    dplyr::group_by(Route, Year, Point) %>%
+    dplyr::mutate(next_richness = lead(Richness)) %>%
+    dplyr::ungroup() %>%
+    dplyr::filter(!is.na(next_richness))
+  
+  #---------------------------
+  # Step 4: Aesthetics
+  #---------------------------
+  Protocol_colors <- c(
+    "ARU" = "#F8766D",
+    "PC"  = "#00BFC4",
+    "ARU + PC" = "grey40"
+  )
+  
+  Protocol_shapes <- c(
+    "ARU" = 16,
+    "PC"  = 16,
+    "ARU + PC" = 18 # diamond
+  )
+  
+  #---------------------------
+  # Step 5: Plot
+  #---------------------------
+  richness_plot <- ggplot(plot_data,
+                          aes(x = Richness, y = Point,
+                              color = Protocol, shape = Protocol)) +
+    
+    geom_segment(
+      data = segment_lines,
+      aes(x = Richness, xend = next_richness,
+          y = Point, yend = Point),
+      inherit.aes = FALSE,
+      color = "grey",
+      linewidth = 1
+    ) +
+    
+    geom_point(aes(x = Richness_jittered), size = 5) +
+    
+    ggh4x::facet_nested(
+      Route ~ Year,
+      scales = "free_y",
+      space = "free_y",
+      switch = "y"
+    ) +
+
+    
+    scale_color_manual(values = Protocol_colors, name = "Survey Protocol") +
+    scale_shape_manual(values = Protocol_shapes, name = "Survey Protocol") +
+    
+    #scale_x_continuous(breaks = scales::breaks_width(1)) +
+    scale_x_continuous(
+      breaks = scales::breaks_width(1),
+      limits = c(0, max(data$Richness, na.rm = TRUE))
+    ) +
+
+    labs(
+      x = if (show_x_axis_title) "Marsh Bird Species Richness" else NULL,
+      y = if (show_y_axis_title) "Survey Location" else NULL,
+      title = if (show_title) "Marsh bird species richness by survey method, site, and year" else NULL
+    ) +
+    
+    theme_minimal(base_size = 16) +
+    theme(
+      strip.placement = "outside",
+      strip.text = element_text(face = "bold"),
+      
+      axis.text.y = if (show_point_labels) {
+        element_text(margin = margin(r = 10))
+      } else {
+        element_blank()
+      },
+      
+      axis.title.y = if (show_y_axis_title) element_text() else element_blank(),
+      
+      axis.ticks.y = if (show_point_labels) element_line() else element_blank(),
+      
+      panel.spacing = unit(1.2, "lines"),
+      panel.background = element_rect(fill = "grey97", color = NA),
+      
+      legend.position = if (show_legend) "top" else "none",
+      legend.justification = "left"
+    )
+  
+  return(richness_plot)
+}
+
+# Plotting (all data)
+# create list of routes
+routes <- sort(unique(all_data_plot$Route))
+
+half <- ceiling(length(routes) / 2)
+
+routes_1 <- routes[1:half]
+routes_2 <- routes[(half + 1):length(routes)]
+
+data_1 <- all_data_plot %>% dplyr::filter(Route %in% routes_1)
+data_2 <- all_data_plot %>% dplyr::filter(Route %in% routes_2)
+
+p1 <- lollipop_rich(
+  data_1,
+  funder = "all",
+  show_y_axis_title = TRUE,
+  show_point_labels = FALSE,   # remove or show Point IDs
+  show_legend = TRUE,
+  show_x_axis_title = TRUE,
+  show_title = TRUE
+)
+
+p2 <- lollipop_rich(
+  data_2,
+  funder = "all",
+  show_y_axis_title = FALSE,  # remove redundant title
+  show_point_labels = FALSE,  # remove or show Point IDs
+  show_legend = FALSE,
+  show_x_axis_title = TRUE,
+  show_title = FALSE
+)
+
+all_richness_plot <- p1 + p2 + plot_layout(ncol = 2)
+
+# Save plot
+ggsave("E:/Documents/Audubon/AGL/ARU/Richness/all_richness_plot.png",
+       plot = all_richness_plot,
+       width = 25, height = 14, dpi = 300, units = "in")
+
+# Plotting (NFWF data for reporting purposes)
+nfwf_richness_plot <- lollipop_rich(
+  all_data_plot,
+  funder = "NFWF/SOGL",
+  show_y_axis_title = TRUE,
+  show_point_labels = TRUE,   # remove or show Point IDs
+  show_legend = TRUE,
+  show_x_axis_title = TRUE,
+  show_title = TRUE
+)
+
+ggsave("E:/Documents/Audubon/AGL/ARU/Richness/nfwf_richness_plot.png",
+       plot = nfwf_richness_plot,
+       width = 14, height = 8, dpi = 300, units = "in")
+```
+
+```{r}
+################################################ 
+# 4. Summarize Richness in Table Form 
+################################################ 
+
+# --------------- General richness comparison statistics --------------- #
+
+all_data_plot %>%
+  filter(Funder == "NFWF/SOGL") %>%
+  dplyr::select(Funder, Point, Protocol, Richness, Route, Year) %>%
+  pivot_wider(names_from = Protocol, values_from = Richness) %>%
+  dplyr::mutate("Difference" = abs(ARU - PC)) %>%
+  pivot_longer(cols = c(ARU, PC), names_to = "Protocol", values_to = "Richness") %>%
+  select(-Protocol, -Richness) %>%
+  unique() %>%
+  summarize(Avg_Difference = mean(Difference), Max_Difference = max(Difference), Min_Difference = min(Difference))
+
+# --------------- Detections by Survey Period (Max = 3) --------------- #
+# note that something is off with this table and need to fix
+summary_table <- pc_aru_data %>%
+  filter(Funder == "NFWF/SOGL") %>%
+  filter(!CommonName %in% c("----", "Trumpeter Swan", "Sandhill Crane", "Snowy Egret", "Forster's Tern")) %>%
+  dplyr::filter(IndivCount >=1) %>%
+  dplyr::mutate(Year = as.character(Year)) %>%
+  dplyr::group_by(Year, Route, Point, Protocol, CommonName) %>%
+  dplyr::summarise(
+    visits_detected = n_distinct(Survey)
+  ) %>%
+  dplyr::select(Year, Route, Point, Protocol, CommonName, visits_detected) %>%
+  pivot_wider(
+    names_from = CommonName,
+    values_from = visits_detected,
+    values_fill = 0
+  )
+
+ft <- flextable(summary_table)
+
+ft <- ft %>%
+  merge_v(j = c("Route", "Point")) %>%   # merge vertically
+  valign(j = c("Route", "Point"), valign = "top") %>%
+  rotate(
+    j = -(1:3),      # rotate all columns except first 4
+    rotation = "btlr",
+    part = "header"
+  ) %>%
+  theme_vanilla() %>%
+  set_table_properties(layout = "autofit")
+
+doc <- read_docx() %>%
+  body_add_flextable(ft)
+
+print(doc, target = "E:/Documents/Audubon/AGL/ARU/Richness/richness_summary.docx")
+
+# --------------- Species Missed Summary Table --------------- #
+
+collapse_and <- function(x) {
+  x <- unique(x)
+  if (length(x) == 1) return(x)
+  if (length(x) == 2) return(paste(x, collapse = " and "))
+  paste(
+    paste(x[-length(x)], collapse = ", "),
+    x[length(x)],
+    sep = ", and "
+  )
+}
+
+richness_table <- pc_aru_data %>%
+  #filter(Funder == "NFWF/SOGL") %>%
+  filter(!CommonName %in% c("----", "Trumpeter Swan", "Sandhill Crane", "Snowy Egret", "Forster's Tern")) %>%
+  dplyr::filter(IndivCount >=1) %>%
+  dplyr::group_by(Year, Route, Point, Protocol) %>%
+  dplyr::summarize(
+    species = list(unique(CommonName)),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = Protocol, values_from = species) %>%
+  mutate(
+    ARU_richness = lengths(ARU),
+    PC_richness  = lengths(PC),
+    Both_richness = purrr::map2_int(PC, ARU, ~ length(union(.x, .y))),
+    
+    missed_by_ARU = map2_chr(PC, ARU, ~ paste(setdiff(.x, .y), collapse = ", ")),
+    missed_by_PC  = map2_chr(ARU, PC, ~ paste(setdiff(.x, .y), collapse = ", "))
+  ) %>%
+  select(
+    Route, Point, Year, PC_richness,
+    ARU_richness, Both_richness,
+    missed_by_ARU, missed_by_PC
+  ) %>%
+  arrange(Route, Year, Point)
+richness_table
+write.csv(richness_table, "E:/Documents/Audubon/AGL/ARU/Richness/species_missed_summary.csv")
+
+```
+
+```{r}
+##################################################### 
+# 5 Lollipop: Detectability by point-year and species
+#####################################################
+
+# Re-ordered by ARU-only, ARU-only max, and Both max
+#### TO DO: 
+# for 0 data, put an outline but no fill, there will be overlap with blue and triangles so just need to play around with that, this will also be important for any other potential overlapping points 
+# proportion instead of number of points on the x axis
+# using different colors or shapes from the other graph
+
+library(dplyr)
+library(tidyr)
+library(forcats)
+
+detect_plot <- function(data, funder = "all", by_year = FALSE) {
+  
+  if (funder != "all") {
+    data <- data %>%
+      dplyr::filter(Funder == funder)
+  }
+  
+  data <- data %>%
+    filter(!CommonName %in% c("----", "Trumpeter Swan", "Sandhill Crane", "Snowy Egret", "Forster's Tern")) %>%
+    filter(IndivCount >= 1)
+  
+  all_sites <- data %>%
+    distinct(Point, Year)
+
+  all_species <- data %>%
+    distinct(CommonName)
+  
+  df_full <- tidyr::crossing(all_sites, all_species)
+  
+  df_unique <- data %>%
+    distinct(Point, Year, CommonName, Protocol) %>%
+    mutate(detected = 1)
+
+  df_wide <- df_full %>%
+    left_join(df_unique, by = c("Point", "Year", "CommonName")) %>%
+    pivot_wider(names_from = Protocol, values_from = detected, values_fill = 0) %>%
+    mutate(
+      ARU = ifelse(is.na(ARU), 0, ARU),
+      PC  = ifelse(is.na(PC), 0, PC),
+      Detection_Category = case_when(
+        ARU == 1 & PC == 0 ~ "Only ARU",
+        ARU == 0 & PC == 1 ~ "Only PC",
+        ARU == 1 & PC == 1 ~ "ARU + PC",
+        TRUE ~ "Neither"
+      )
+    )
+  
+  # ---- COUNTS + PERCENT ----
+  if (by_year) {
+    species_miss_counts <- df_wide %>%
+      dplyr::group_by(Year, CommonName, Detection_Category) %>%
+      dplyr::summarise(count = n(), .groups = "drop") %>%
+      dplyr::left_join(
+        df_wide %>%
+          dplyr::group_by(Year, CommonName) %>%
+          dplyr::summarise(total_sites = n(), .groups = "drop"),
+        by = c("Year", "CommonName")
+      )
+  } else {
+    species_miss_counts <- df_wide %>%
+      dplyr::group_by(CommonName, Detection_Category) %>%
+      dplyr::summarise(count = n(), .groups = "drop") %>%
+      dplyr::left_join(
+        df_wide %>%
+          dplyr::group_by(CommonName) %>%
+          dplyr::summarise(total_sites = n(), .groups = "drop"),
+        by = "CommonName"
+      )
+  }
+  
+  species_miss_counts <- species_miss_counts %>%
+    dplyr::mutate(percent = count / total_sites) %>%
+    filter(Detection_Category != "Neither")
+  
+  # factor levels
+  category_levels <- c("Only ARU", "Only PC", "ARU + PC")
+  species_miss_counts <- species_miss_counts %>%
+    dplyr::mutate(Detection_Category = factor(Detection_Category, levels = category_levels))
+  
+  # ---- SEGMENTS (use percent now!) ----
+  if (by_year) {
+    segments_df <- species_miss_counts %>%
+      group_by(Year, CommonName)
+  } else {
+    segments_df <- species_miss_counts %>%
+      group_by(CommonName)
+  }
+  
+  segments_df <- segments_df %>%
+    arrange(Detection_Category) %>%
+    dplyr::reframe(
+      x_start = percent[-length(percent)],
+      x_end   = percent[-1],
+      y       = CommonName[1]
+    )
+  
+  # ---- ORDERING (use percent instead of count) ----
+  max_n_per_common <- species_miss_counts %>%
+    dplyr::group_by(CommonName) %>%
+    dplyr::mutate(max_n = max(percent)) %>%
+    filter(percent == max_n) %>%
+    slice(1) %>%
+    ungroup() %>%
+    select(CommonName, Detection_Category_max = Detection_Category, max_n)
+  
+  only_aru_common <- species_miss_counts %>%
+    dplyr::group_by(CommonName) %>%
+    dplyr::summarize(only_aru = all(Detection_Category == "Only ARU")) %>%
+    ungroup()
+  
+  ordering_info <- max_n_per_common %>%
+    dplyr::left_join(only_aru_common, by = "CommonName") %>%
+    dplyr::mutate(order_group = case_when(
+      only_aru ~ 1,
+      Detection_Category_max == "Only ARU" ~ 2,
+      Detection_Category_max == "ARU + PC" ~ 3,
+      TRUE ~ 4
+    ))
+  
+  species_miss_counts_ordered <- species_miss_counts %>%
+    left_join(ordering_info, by = "CommonName") %>%
+    arrange(desc(order_group), desc(max_n), CommonName)
+  
+  species_order <- unique(species_miss_counts_ordered$CommonName)
+  
+  # ---- PLOT (use percent!) ----
+  reverse_detplot <- ggplot(
+    species_miss_counts,
+    aes(x = percent,
+        y = CommonName,
+        color = Detection_Category,
+        shape = Detection_Category,
+        group = Detection_Category
+      )
+  ) +
+    geom_segment(
+      data = segments_df,
+      aes(x = x_start, xend = x_end, y = y, yend = y),
+      inherit.aes = FALSE,
+      color = "grey50",
+      size = 1
+    ) +
+    geom_point(
+      aes(
+        x = percent + case_when(
+          Detection_Category == "Only ARU" ~ -0.01,
+          Detection_Category == "Only PC" ~ 0.01,
+          Detection_Category == "ARU + PC" ~ 0.01,
+          TRUE ~ 0
+        ),
+        color = Detection_Category,
+        shape = Detection_Category
+      ),
+      size = 4
+    ) +
+    #geom_point(size = 4,
+    #           position = position_jitter(width = 0.02, height = 0)) +
+    scale_color_manual(values = c(
+      "Only ARU" = "#F8766D",
+      "Only PC" = "#00BFC4",
+      "ARU + PC" = "grey40"
+    )) +
+    scale_shape_manual(values = c(
+      "Only ARU" = 16,
+      "Only PC" = 16,
+      "ARU + PC" = 18
+    )) +
+    #scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous(
+      limits = c(0,1),
+      breaks = seq(0, 1, by = 0.2),
+      labels = scales::percent_format(accuracy = 1)
+    ) +
+    labs(
+      title = "Species Detection by Survey Protocol",
+      x = "Percent of Point-Years with Detections",
+      y = "Species",
+      color = "Detection Category",
+      shape = "Detection Category"
+    ) +
+    scale_y_discrete(limits = species_order) +
+    theme_minimal(base_size = 14)
+  
+  if (by_year) {
+    reverse_detplot <- reverse_detplot +
+      facet_wrap(~Year, ncol = 2)
+  }
+  
+  return(reverse_detplot)
+}
+
+detect_all <- detect_plot(pc_aru_data, funder = "all")
+detect_nfwf <- detect_plot(pc_aru_data, funder = "NFWF/SOGL")
+
+# Save
+ggsave("E:/Documents/Audubon/AGL/ARU/Richness/species_all_detplot.png",
+       plot = detect_all,
+       width = 8, height = 8, dpi = 300, units = "in")
+ggsave("E:/Documents/Audubon/AGL/ARU/Richness/species_nfwf_detplot.png",
+       plot = detect_nfwf,
+       width = 10, height = 7, dpi = 300, units = "in")
+
+points <- pc_aru_data %>%
+  select(Route, Funder, Lat, Long) %>%
+  distinct(Route, .keep_all = TRUE)
+
+write.csv(points, "E:/Documents/Audubon/AGL/ARU/map_points.csv")
+```
+
+```{r}
+# Score discrimination
+# paper: https://www.nature.com/articles/s41598-025-95207-3
+# Summarizing score distributions separately for the two classes:
+  # mu and sigma 0 = mean and SD of scores for negatives (label = 0)
+  # mu and sigma 1 = mean and SD of scores for positives (label = 1)
+# logit transformed scores
+
+all_scores <- read.csv("E:/Documents/Audubon/AGL/ARU/Validation/Verified/AGLARU_Validated_2_27_26.csv")
+
+# Standardize to logit scores
+all_scores <- all_scores %>%
+  mutate(Confidence_adj = pmin(pmax(Confidence, 1e-6), 1 - 1e-6), # "clamp" keep values finite instead of 0 and 1
+         Confidence_logit = qlogis(Confidence_adj)) # logit transformation
+
+# filter to remove comparisons with extremely low sample sizes
+all_scores <- all_scores %>%
+  group_by(CommonName) %>%
+  filter(
+    sum(IndivCount >= 1) >= 30,
+    sum(IndivCount == 0) >= 30
+  ) %>%
+  ungroup()
+
+library(dplyr)
+
+# summarize score parameters
+score_params <- all_scores %>%
+  dplyr::group_by(CommonName, IndivCount) %>%
+  dplyr::summarise(
+    mu = mean(Confidence_logit, na.rm = TRUE),
+    sigma = sd(Confidence_logit, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+library(tidyr)
+
+score_params_wide <- score_params %>%
+  pivot_wider(
+    names_from = IndivCount,
+    values_from = c(mu, sigma),
+    names_glue = "{.value}_{IndivCount}"
+  ) %>%
+  mutate(
+    d_prime = (mu_1 - mu_0) /
+      sqrt((sigma_0^2 + sigma_1^2) / 2)
+  )
+
+params_ordered <- score_params_wide %>%
+  arrange(d_prime)
+
+write.csv(params_ordered, "E:/Documents/Audubon/AGL/ARU/Richness/Conf_Score_Disc.csv")
+
+library(ggplot2)
+
+conf_disc <- ggplot(all_scores, aes(x = Confidence_logit, fill = factor(IndivCount))) +
+  geom_density(alpha = 0.4) +
+  facet_wrap(~CommonName, scales = "free") +
+  labs(
+    x = "Logit-transformed Confidence Score",
+    y = "Density",
+    fill = "Label (0 = False Positive, 1 = True Positive)",
+    title = "Density of validated logit-transformed BirdNET Analyzer confidence scores"
+  )
+
+conf_disc <- ggplot(all_scores, aes(x = Confidence, fill = factor(IndivCount))) +
+  geom_density(alpha = 0.4) +
+  facet_wrap(~CommonName, scales = "free") +
+  labs(
+    x = "Logit-transformed Confidence Score",
+    y = "Density",
+    fill = "Label (0 = False Positive, 1 = True Positive)",
+    title = "Density of validated logit-transformed BirdNET Analyzer confidence scores"
+  )
+    
+ggsave("E:/Documents/Audubon/AGL/ARU/Richness/confidence_score_discrimination.png",
+       plot = conf_disc,
+       width = 12, height = 8, dpi = 300, units = "in")
+```
+
+```{r}
+# how many validations per species and unique date and point
+scoresummary <- all_scores %>%
+  select(Route, Point, Date, BirdCd, StartTime, Confidence, IndivCount, ObservationRemarks) %>%
+  dplyr::filter(!is.na(IndivCount)) %>%
+  distinct() %>%
+  dplyr::group_by(Route, Point, Date, BirdCd) %>%
+  dplyr::summarise(n_rows = n())
+  
+range(scoresummary$n_rows)
+
+scoresummary %>%
+  filter(n_rows > 5)
+
+all_scores %>%
+  select(Route, Point, Date, BirdCd, StartTime, Confidence, IndivCount, Year, ObservationRemarks) %>%
+  dplyr::filter(!is.na(IndivCount)) %>%
+  distinct() %>%
+  filter(Route == "BIGM") %>%
+  filter(Year == "2024") %>%
+  filter(BirdCd == "KIRA")
+
+# Peter's Marsh was checked up to 15
+
+```
+

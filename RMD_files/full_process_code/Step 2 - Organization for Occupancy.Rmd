@@ -1,0 +1,677 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Load required libraries
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(kableExtra)
+library(data.table)
+library(plyr)                                                 
+library(readr)
+library(hms)
+```
+
+```{r}
+# STEP 2. Post-processing Validated ARU data for Occupancy analysis
+
+# Specify input filepaths: 
+
+  # Validated ARU Results
+  folder_path_v <- "D:/Documents/Audubon/AGL/ARU/Validation/Verified"
+  
+  # Point-matching data to filter out dates overlapping with Point Counts/add metadata. You will need to create your own depending on your project needs
+  ARU_Match <- read.csv("D:/Documents/Audubon/AGL/ARU/Validation/ARU_Point_Match_v2.csv")
+```
+
+
+```{r}
+################################################    
+# 1. Add Data
+################################################    
+
+  # List all .txt files in the folder
+  file_list_v <- list.files(path = folder_path_v, pattern = "\\.txt$", full.names = TRUE)
+  
+  # Read all files into a list of dataframes
+  library(readr)
+  #data_list_v <- lapply(file_list_v, read_tsv)
+  data_list_v <- lapply(file_list_v, function(f) {
+  read_tsv(f, show_col_types = FALSE) %>%
+    mutate(
+      ARU = as.character(ARU),
+      Verify = as.character(Verify)   
+    )
+})
+
+
+  #data_list_v <- lapply(file_list_v, read.table, header = TRUE, sep = "\t")  # Adjust `sep` as needed
+  
+  # combine data and add year
+  combined_data_v0 <- bind_rows(data_list_v) %>%
+    distinct() %>%
+    mutate(Date = as.character(ymd(Date)),
+      filename = basename(`Begin Path`),
+      ARU = str_remove(filename, "_\\d{8}_\\d{6}\\.wav$"),
+      date = str_extract(filename, "\\d{8}")
+    )
+  
+  combined_data_v0$Year <- format(as.Date(combined_data_v0$Date, format = "%Y-%m-%d"), "%Y") 
+
+  # organize and filter data
+  combined_data_v <- combined_data_v0 %>%
+  select(Selection, View, Channel, `Begin Path`, `Begin Time (s)`, `End Time (s)`, `File Offset (s)`, `Common Name`, `Scientific Name`, Confidence, Site, ARU, Date, date, Year, Survey, Verify, Notes, meta_notes) %>%
+  dplyr::rename(
+    Route = Site,
+    ObservationRemarks = Notes,
+    CommonName = `Common Name`
+  ) %>%
+  mutate(
+    Date = as.character(ymd(Date)),
+    Protocol = "ARU"
+  ) %>%
+  mutate(ObservationRemarks = ifelse(is.na(ObservationRemarks), "", ObservationRemarks)) %>%
+  mutate(meta_notes = ifelse(is.na(meta_notes), "", meta_notes)) %>%
+  mutate(
+    ObservationRemarks = paste(ObservationRemarks, meta_notes, sep = " ")
+  ) %>%
+  select(-meta_notes) %>%
+  arrange(Route, ARU, CommonName, Date) %>%
+  # remove NAs for data shared but not validated yet
+  drop_na(Verify) %>%
+  mutate(Verify = replace(Verify, Verify == "3", "0")) #temporarily list unknown/3s as 0s
+
+######################################################    
+# 2. Add reference ARU metadata with conditional logic
+###################################################### 
+  
+  aru_match_points <- ARU_Match %>%
+    select(project, point, site, ARU, geography, lat, long, state, year) %>%
+    dplyr::rename(Point = point, Route = site, Geography = geography, Lat = lat, Long = long, State = state, Year = year) %>%
+    mutate(Year = as.character(Year)) 
+  
+  final_data <- combined_data_v %>%
+    dplyr::select("Selection", "View", "Channel", "Begin Path", "Begin Time (s)", "End Time (s)", "File Offset (s)", "CommonName", "Scientific Name", "Confidence", "Date", "Year", "ARU", "Survey", "Route", "Verify", "ObservationRemarks", "Protocol") %>%
+    left_join(aru_match_points, by = c("Year", "ARU")) 
+
+###################################################### 
+# 3.  Add bird codes and re-order to match MWADC
+###################################################### 
+  
+  all_birds <- final_data %>%
+    select(CommonName) %>%
+    unique() %>%
+    mutate(BirdCd = case_when(
+    CommonName == "Least Bittern" ~ "LEBI",
+    CommonName == "Marsh Wren" ~ "MAWR",
+    CommonName == "Sora" ~ "SORA",
+    CommonName == "Swamp Sparrow" ~ "SWSP",
+    CommonName == "Virginia Rail" ~ "VIRA",
+    CommonName == "Blue-winged Teal" ~ "BWTE",
+    CommonName == "Yellow-headed Blackbird" ~ "YHBL",
+    CommonName == "Black-crowned Night Heron" ~ "BCNH",
+    CommonName == "Black-crowned Night-Heron" ~ "BCNH",
+    CommonName == "King Rail" ~ "KIRA",
+    CommonName == "Yellow-crowned Night Heron" ~ "YCNH",
+    CommonName == "Yellow-crowned Night-Heron" ~ "YCNH",
+    CommonName == "Little Blue Heron" ~ "LBHE",
+    CommonName == "Black Tern" ~ "BLTE",
+    CommonName == "Pied-billed Grebe" ~ "PBGR",
+    CommonName == "American Bittern" ~ "AMBI",
+    CommonName == "Common Gallinule" ~ "COGA",
+    CommonName == "American Coot" ~ "AMCO"))
+
+###################################################### 
+# 4. Update time formatting
+###################################################### 
+  
+  # Pull the last set of numbers between _ and .wav under "File Offset (s)" column, e.g., 50000 from "/BIGM02_20240525_050000.wav". Convert to hours, so 50000 = 5:00:00 AM. Then add the seconds to the time from the "Begin Time (s)" column, e.g., 239287.960 to make a column called "Time Detected"	
+  
+final_data2 <- final_data %>%
+  mutate(
+    # Step 1: Extract raw time from filename
+    raw_time = str_extract(`Begin Path`, "(?<=_)\\d+(?=\\.wav)"),
+
+    # Step 1a: If raw_time has only 4 digits, add a trailing 0
+    raw_time = if_else(str_length(raw_time) == 4,
+                       paste0(raw_time, "0"),
+                       raw_time),
+
+    # Step 1b: Pad to 6 digits (HHMMSS)
+    raw_time = str_pad(raw_time, width = 6, pad = "0"),
+
+    # Step 2: Convert to POSIXct (dummy date)
+    base_time = as.POSIXct(
+      str_replace(raw_time, "(\\d{2})(\\d{2})(\\d{2})", "\\1:\\2:\\3"),
+      format = "%H:%M:%S",
+      tz = "UTC"
+    ),
+    # Step 3: Add file offset and adjust CMBM times
+    StartTime = format(
+    base_time + as.numeric(`File Offset (s)`),
+    "%H:%M:%S"
+  )
+  ) %>%
+  mutate(
+    StartTime = if_else(
+      Route.x == "CMBM",
+      format(
+        as.POSIXct(StartTime, format = "%H:%M:%S", tz = "UTC") - 3600,
+        "%H:%M:%S"
+      ),
+      StartTime
+    )
+  ) %>%
+  # Step 4: Remove specific problematic rows
+  filter(
+    !(ARU == "SMA06019COBO" & raw_time == "111030"),
+    !(ARU == "SMA06024GRMW" & raw_time == "200538"),
+    !(ARU == "SMA06018GRAS" & Year == 2023 & Survey == 1), # GRAS 2023 Survey 1, dropped due to incorrect recording times 
+    !(ARU == "SMA06024GRMW" & Year == 2024 & Survey == 2), # GRMW-04 Survey 2 dropped due to dead batteries
+    !(ARU == "S4A12908" & Year == 2023 & Survey == 1), # WLSE-04 Survey 1 off by 1 hour, dropped
+    !(ARU == "SMA06018KSW3" & Year == 2024), # KASW-03 Survey 1 dropped due to technical issues and PC missing during survey 3, need to drop the entire point
+    !(ARU == "SMA06001BIGM" & Year == 2022 & Survey == 3), # No recordings at BIGM 11 in 2022
+    !(ARU == "SMA06000KSW2" & Year == 2024 & Survey == 3), # KASW-02 PC missing survey 3
+    !(ARU == "S4A13179" & Year == 2023 & Survey == 1), #WLSW-04 PC missing survey 1
+    !(ARU == "CHEBW2" & Year == 2023 & Survey == 1), #CHEB-02 PC missing survey 1
+  )
+  
+###################################################### 
+# 5. Clean up and reformat columns
+###################################################### 
+  
+  # Clean up/reformat columns
+  final_data_ordered <- final_data2 %>%
+    left_join(all_birds, by = "CommonName") %>%
+    select(-View, -Channel, -base_time, -Route.y) %>%
+    select(
+    project, Route.x, Point, Protocol, Survey, Year, Date, StartTime,
+    BirdCd, CommonName, `Scientific Name`, Confidence, Verify, ObservationRemarks, `Begin Path`,
+    everything()
+  ) %>%
+    dplyr::rename(Route = Route.x) %>%
+    dplyr::rename(Project = project) %>%
+    dplyr::rename(IndivCount = Verify) %>%
+    mutate(CommonName = str_replace(CommonName, "Black-crowned Night-Heron", "Black-crowned Night Heron")) %>%
+    mutate(CommonName = str_replace(CommonName, "Yellow-crowned Night-Heron", "Yellow-crowned Night Heron")) 
+ 
+write.csv(final_data_ordered, "D:/Documents/Audubon/AGL/ARU/Validation/Verified/AGLARU_Validated_6_15_26.csv")
+###################################################### 
+# 5. Clean up extra data rows
+###################################################### 
+  
+  # Only keep 1 row per species / ARU / day
+  final_data_ordered2 <- final_data_ordered %>%  
+    group_by(CommonName, Point, Date) %>%
+      group_modify(~{
+        data <- .
+        
+        # Try filtering to rows with IndivCount == 1
+        verified <- data %>% filter(IndivCount == 1)
+        
+        if (nrow(verified) > 0) {
+          # Keep the row with highest confidence among verified
+          verified %>% slice_max(order_by = Confidence, n = 1, with_ties = FALSE)
+        } else if (nrow(data) > 0) {
+          # No verified rows, keep row with highest confidence overall
+          data %>% slice_max(order_by = Confidence, n = 1, with_ties = FALSE)
+        } else {
+          # Just in case a group is somehow completely empty, return nothing
+          tibble()
+        }
+      }) %>%
+      ungroup() 
+
+  # Clean up data where there are 16 instead of 15 total survey days
+  
+  # Function to drop one row from groups with >15 unique dates
+  reduce_over15 <- function(df) {
+    df %>%
+      dplyr::group_by(Point, Year, CommonName) %>%
+      group_modify(~{
+        # Skip if group is already <= 15 rows
+        if (nrow(.x) <= 15) return(.x)
+  
+        # Add internal row index for safe deletion
+        .x$row_idx <- seq_len(nrow(.x))
+  
+        # Count rows per Survey
+        survey_table <- table(.x$Survey)
+        surveys_gt5 <- names(survey_table[survey_table > 5])
+  
+        # If no Survey has >5 rows, return as-is
+        if (length(surveys_gt5) == 0) return(.x %>% select(-row_idx))
+  
+        # Filter to candidates
+        candidates <- .x[.x$Survey %in% surveys_gt5, ]
+  
+        # Prioritize IndivCount == 0
+        removable <- candidates[candidates$IndivCount == 0, ]
+  
+        if (nrow(removable) == 0) {
+          removable <- candidates
+        }
+  
+        # Pick one row index to remove
+        idx_to_remove <- sample(removable$row_idx, 1)
+  
+        # Return data without that row
+        .x <- .x[.x$row_idx != idx_to_remove, ]
+        .x <- .x %>% select(-row_idx)
+        return(.x)
+      }) %>%
+      ungroup()
+  }
+
+final_data_cleaned <- reduce_over15(final_data_ordered2)
+
+###################################################### 
+# 5.5. Temporary Cleaning (remove after data fixes)
+######################################################
+
+# Temporarily remove CARI 2024 and GRAS 2023 - identify and fix issues with times
+#final_data_ordered_temp <- final_data_cleaned %>%
+#  filter(!(Route == "GRAS" & Year == "2023")) 
+
+# Double check to make sure there are <15 days per species / point / year
+final_data_cleaned %>%
+  dplyr::group_by(Year, Point, CommonName) %>%
+  dplyr::summarize(days <- max(length(unique(Date))))
+
+###################################################### 
+# 6. 0-Fill ARU Non-detections
+######################################################
+
+# add up to 5 additional rows, if there are less than 5 rows, per Survey, CommonName, Point, and Year. Dates should be randomly assigned in character format (e.g., 2024-05-02) and must be between the following month and day, depending on the Survey and Geography, where:
+  # Geography = North, Survey = 1 between 5/15 and 5/31, Survey = 2 between 6/01 and 6/14, Survey = 3 between 6/15 and 6/30
+  # Geography = Central, Survey = 1 between 5/01 and 5/14, Survey = 2 between 5/15 and 5/31, Survey = 3 between 6/01 and 6/15
+  # Geography = South, Survey = 1 between 4/15 and 4/30, Survey = 2 between 5/01 and 5/14, Survey = 3 between 5/15 and 5/31
+# No dates can overlap
+
+# StartTime should also be randomly assigned (currently in character format, e.g., 06:56:35) and must be between the minimum of 5:00 AM and maximum of 8:30 AM with the exception of Route == "CMBM" where the minimum time is 6:00 AM and maximum is 9:30 AM The associated CommonName, Point, and Year should be populated, and the IndivCount = 0.
+
+# Need to note which sites had missing ARU SURVEYS! This is VERY IMPORTANT because you CAN'T ZERO FILL THESE ONES
+# Review Surveys
+final_data_ordered$IndivCount <- as.integer(final_data_ordered$IndivCount)
+missing_survey_review <- final_data_ordered %>%
+  dplyr::group_by(ARU, Year, Survey) %>%
+  dplyr::summarize(Count = sum(IndivCount), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = Survey, values_from = Count) %>%
+  tidyr::pivot_longer(
+    cols = -c(ARU, Year),
+    names_to = "Missing_Survey",
+    values_to = "Count"
+  ) %>%
+  dplyr::filter(is.na(Count)) %>%
+  select(-Count)
+
+# Function to add rows as stated above
+add_rows_if_needed4 <- function(df, missing_survey_review) {
+  
+  df$raw_time <- as.character(df$raw_time)
+  df$Survey   <- as.character(df$Survey)
+  
+  date_ranges <- list(
+    North = list("1" = c("05-15", "05-31"), "2" = c("06-01", "06-14"), "3" = c("06-15", "06-30")),
+    Central = list("1" = c("05-01", "05-14"), "2" = c("05-15", "05-31"), "3" = c("06-01", "06-15")),
+    South = list("1" = c("04-15", "04-30"), "2" = c("05-01", "05-14"), "3" = c("05-15", "05-31"))
+  )
+  
+  get_random_times <- function() {
+    
+    min_sec <- 5 * 3600              # 05:00:00
+    max_sec <- 8 * 3600 + 30 * 60    # 08:30:00
+    
+    rand_sec <- sample(min_sec:max_sec, 1)
+    
+    sprintf(
+      "%02d:%02d:%02d",
+      rand_sec %/% 3600,
+      (rand_sec %% 3600) %/% 60,
+      rand_sec %% 60
+    )
+  }
+  
+  get_date_pool <- function(geography, survey, year) {
+    range <- date_ranges[[geography]][[as.character(survey)]]
+    seq(
+      lubridate::ymd(paste0(year, "-", range[1])),
+      lubridate::ymd(paste0(year, "-", range[2])),
+      by = "day"
+    )
+  }
+  
+  carry_cols <- c(
+    "CommonName", "Point", "Year", "Geography", "Project", "Route", "Protocol",
+    "BirdCd", "Scientific Name", "ARU", "Lat", "Long", "State"
+  )
+  
+  final_rows <- list()
+  group_keys <- df %>% distinct(CommonName, Point, Year)
+  
+  for (i in seq_len(nrow(group_keys))) {
+    
+    grp <- group_keys[i, ]
+    
+    rows_grp <- df %>%
+      dplyr::filter(
+        CommonName == grp$CommonName,
+        Point == grp$Point,
+        Year == grp$Year
+      )
+    
+    ref_row   <- rows_grp[1, ]
+    geography <- ref_row$Geography
+    year      <- ref_row$Year
+    point     <- ref_row$Point
+    common    <- ref_row$CommonName
+    
+    used_dates <- unique(as.character(rows_grp$Date))
+    
+    all_survey_rows <- list()
+    
+    for (survey in c("1", "2", "3")) {
+      
+      existing_rows <- rows_grp %>% 
+        dplyr::filter(Survey == survey)
+      
+      n_existing <- existing_rows$Date %>% 
+        unique() %>% 
+        length()
+      
+      if (any(
+        missing_survey_review$ARU == ref_row$ARU &
+          missing_survey_review$Year == year &
+          missing_survey_review$Missing_Survey == survey,
+        na.rm = TRUE
+      )) {
+        all_survey_rows[[survey]] <- existing_rows %>% 
+          mutate(Added = "No")
+        next
+      }
+      
+      n_needed <- 5 - n_existing
+      
+      if (n_needed <= 0) {
+        all_survey_rows[[survey]] <- existing_rows %>% 
+          mutate(Added = "No")
+        next
+      }
+      
+      eligible_dates <- get_date_pool(geography, survey, year) %>%
+        as.character() %>%
+        setdiff(used_dates)
+      
+      if (length(eligible_dates) < n_needed) {
+        warning(paste("Not enough unique dates for", common, point, year, "Survey", survey))
+        all_survey_rows[[survey]] <- existing_rows %>% 
+          mutate(Added = "No")
+        next
+      }
+      
+      new_dates <- sample(eligible_dates, n_needed)
+      used_dates <- c(used_dates, new_dates)
+      
+      new_rows <- lapply(new_dates, function(d) {
+        
+        row <- tibble::tibble(
+          Survey     = survey,
+          CommonName = common,
+          Point      = point,
+          Year       = year,
+          Date       = d,
+          StartTime  = get_random_times(),
+          IndivCount = 0,
+          Added      = "Yes"
+        )
+        
+        for (col in carry_cols) {
+          row[[col]] <- ref_row[[col]]
+        }
+        
+        row
+      }) %>% 
+        dplyr::bind_rows()
+      
+      all_survey_rows[[survey]] <- dplyr::bind_rows(
+        existing_rows %>% mutate(Added = "No"),
+        new_rows
+      )
+    }
+    
+    final_rows[[length(final_rows) + 1]] <- dplyr::bind_rows(all_survey_rows)
+  }
+  
+  dplyr::bind_rows(final_rows)
+}
+
+# Run function
+final_data_cleaned$IndivCount <- as.integer(final_data_cleaned$IndivCount)
+final_zerofill_data <- add_rows_if_needed4(
+  final_data_cleaned,
+  missing_survey_review
+)
+
+# Remove weird rows with 16 observations that weren't already filtered
+df_trimmed <- final_zerofill_data %>%
+  dplyr::group_by(Survey, CommonName, Point, Year) %>%
+  dplyr::arrange(IndivCount) %>%  # 0s first
+  dplyr::mutate(row_id = row_number()) %>%
+  filter(row_id <= 5) %>%
+  ungroup() %>%
+  select(-row_id) 
+  
+# Double check trimming
+df_trimmed %>%
+  group_by(CommonName, Point, Year) %>%
+  tally() %>%
+  filter(n == 15) 
+
+# Double check number of point years (should be 60)
+df_trimmed %>%
+  select(Point, Year) %>%
+  unique()
+
+# Add index/visit 
+df_trimmed_final <- df_trimmed %>%
+  dplyr::group_by(Point, Year, CommonName) %>%
+  dplyr::arrange(as.Date(Date), .by_group = TRUE) %>%
+  dplyr::mutate(Visit = dplyr::row_number()) %>%
+  dplyr::ungroup()
+
+write.csv(df_trimmed_final, "D:/Documents/Audubon/AGL/ARU/Validation/Verified/ARU_occupancy_zerofill_6_15_26.csv")
+```
+
+
+```{r}
+# Specify input filepaths: 
+
+  # PC Data (raw downloads from MWADC)
+  bigm_pc0 <- read.csv("D:/Documents/Audubon/AGL/ARU/Results/MWADC/BigMarsh_MWADC.csv")
+  pete_pc0 <- read.csv("D:/Documents/Audubon/AGL/ARU/Results/MWADC/PetersMarsh_MWADC.csv")
+  in_pc0 <- read.csv("D:/Documents/Audubon/AGL/ARU/Results/MWADC/Indiana_MWADC.csv")
+  cheb_pc0 <- read.csv("D:/Documents/Audubon/AGL/ARU/Results/MWADC/ChebDunc_MWADC.csv")
+```
+
+
+```{r}
+###################################################### 
+# 7. Combine ARU and Point Count Datasets
+######################################################
+
+# Specify input filepaths: 
+
+  # PC Data (raw downloads from MWADC)
+  bigm_pc0 <- read.csv("D:/Documents/Audubon/AGL/ARU/Results/MWADC/BigMarsh_MWADC.csv")
+  pete_pc0 <- read.csv("D:/Documents/Audubon/AGL/ARU/Results/MWADC/PetersMarsh_MWADC.csv")
+  in_pc0 <- read.csv("D:/Documents/Audubon/AGL/ARU/Results/MWADC/Indiana_MWADC.csv")
+  cheb_pc0 <- read.csv("D:/Documents/Audubon/AGL/ARU/Results/MWADC/ChebDunc_MWADC.csv")
+  
+  # ARU Data (0-Fill data from Step 2)
+  arudata <- read.csv("D:/Documents/Audubon/AGL/ARU/Validation/Verified/ARU_occupancy_zerofill_6_15_26.csv") %>%
+    # fix willow slough 
+    dplyr::mutate(Point = case_when(
+        Point == "WSLE-04" ~ "WLSE-04",
+        Point == "WSLW-04" ~ "WLSW-04",
+        Point == "WSLW-05" ~ "WLSW-05",
+        TRUE ~ Point
+      )) %>%
+    dplyr::mutate(Route = case_when(
+        Route == "WSLE" ~ "WLSE",
+        Point == "WSLW" ~ "WLSW",
+        TRUE ~ Route
+      )) %>%
+  arrange(Year)
+
+  ## Read in MWADC Data
+bigm_pc <- bigm_pc0 %>%
+  dplyr::rename(Route = TransectName, Point = PointName, Distance = DistanceBinId, IndivCount = BirdCount, IndivID = IndivId, Passive.1 = Min1 , Passive.2 = Min2, Passive.3 = Min3, Passive.4 = Min4, Passive.5 = Min5, Call.1 = Min6, Call.2 = Min7, Call.3 = Min8, Call.4 = Min9, Call.5 = Min10) %>%
+  dplyr::select(Project, Route, Point, Protocol, Visit, Date, StartTime, BirdCd, CommonName, IndivID, Distance, IndivCount, Passive.1, Passive.2, Passive.3, Passive.4, Passive.5, Call.1, Call.2, Call.3, Call.4, Call.5, DuplicateIndiv, CallTypes, Direction, Researcher, ObservationRemarks)
+
+pete_pc <- pete_pc0 %>%
+  dplyr::rename(Route = TransectName, Point = PointName, Distance = DistanceBinId, IndivCount = BirdCount, IndivID = IndivId, Passive.1 = Passive_Minute_1 , Passive.2 = Passive_Minute_2, Passive.3 = Passive_Minute_3, Passive.4 = Passive_Minute_4, Passive.5 = Passive_Minute_5, Call.1 = LEBI_Min6, Call.2 = SORA_Min7, Call.3 = VIRA_Min8, Call.4 = COGA_Min9, Call.5 = PBGR_Min10) %>%
+  dplyr::select(Project, Route, Point, Protocol, Visit, Date, StartTime, BirdCd, CommonName, IndivID, Distance, IndivCount, Passive.1, Passive.2, Passive.3, Passive.4, Passive.5, Call.1, Call.2, Call.3, Call.4, Call.5, DuplicateIndiv, CallTypes, Direction, Researcher, ObservationRemarks)
+
+in_pc <- in_pc0 %>%
+  dplyr::rename(Route = TransectName, Point = PointName,  IndivCount = BirdCount, IndivID = IndivId, Distance = DistanceBinId, Passive.1 = Passive_Minute_1, Passive.2 = Passive_Minute_2, Passive.3 = Passive_Minute_3, Passive.4 = Passive_Minute_4, Passive.5 = Passive_Minute_5, Call.1 = LEBI_Min6, Call.2 = SORA_Min7, Call.3 = VIRA_Min8, Call.4 = KIRA_Min9, Call.5 = COGA_Min10) %>%
+  dplyr::select(Project, Route, Point, Protocol, Visit, Date, StartTime, BirdCd, CommonName, IndivID, Distance, IndivCount, Passive.1, Passive.2, Passive.3, Passive.4, Passive.5, Call.1, Call.2, Call.3, Call.4, Call.5, DuplicateIndiv, CallTypes, Direction, Researcher, ObservationRemarks)
+
+cheb_pc <- cheb_pc0 %>%
+  dplyr::rename(Route = TransectName, Point = PointName,  IndivCount = BirdCount, IndivID = IndivId, Distance = DistanceBinId, Passive.1 = Passive_Minute_1, Passive.2 = Passive_Minute_2, Passive.3 = Passive_Minute_3, Passive.4 = Passive_Minute_4, Passive.5 = Passive_Minute_5, Call.1 = LEBI_Min6, Call.2 = SORA_Min7, Call.3 = VIRA_Min8, Call.4 = COGA_Min9, Call.5 = PBGR_Min10) %>%
+  dplyr::select(Project, Route, Point, Protocol, Visit, Date, StartTime, BirdCd, CommonName, IndivID, Distance, IndivCount, Passive.1, Passive.2, Passive.3, Passive.4, Passive.5, Call.1, Call.2, Call.3, Call.4, Call.5, DuplicateIndiv, CallTypes, Direction, Researcher, ObservationRemarks)
+
+# Combine MWADC datasets
+pcdata_raw <- rbind(bigm_pc, pete_pc, in_pc, cheb_pc) %>%
+    dplyr::filter(!DuplicateIndiv %in% c("Y", "1", "Yes")) %>%
+    #filter(!CommonName %in% c("Trumpeter Swan", "Sandhill Crane", "Snowy Egret", "Forster's Tern")) %>%
+    dplyr::select(-DuplicateIndiv) %>%
+    # fix naming issues with PINE
+    dplyr::mutate(Route = str_replace(Route, "PINE", "PINW")) %>%
+    dplyr::mutate(Point = str_replace(Point, "^PINE\\d+", "PINE")) %>%
+    # fix CMBM Route naming issue
+    dplyr::mutate(Route = str_replace(Route, "^CMBM-[A-Za-z]+$", "CMBM")) %>%
+    dplyr::mutate(Route = sub("-.*", "", Route)) %>%
+    dplyr::mutate(Route = str_remove(Route, " .*")) %>%
+    dplyr::mutate(Survey = Visit)
+
+pcdata_raw$Year <- format(as.Date(pcdata_raw$Date, format = "%Y-%m-%d"), "%Y")
+
+
+# Filter to ARU points
+pcdata <- pcdata_raw %>%
+  dplyr::mutate_at("Year", as.integer) %>%
+  dplyr::semi_join(arudata, by = c("Point", "Year", "Survey")) %>%
+  arrange(Year) 
+colnames(pcdata)
+
+arudata %>% 
+  dplyr::group_by(Point, Year) %>%
+  dplyr::summarize(Visit = length(unique(Visit)))
+
+pcdata %>% 
+  dplyr::group_by(Point, Year) %>%
+  dplyr::summarize(Visit = length(unique(Visit)))
+
+all_zerofill <- bind_rows(arudata, pcdata) %>%
+  select(-X, -Scientific.Name) %>%
+  mutate(Protocol = case_when(Protocol != "ARU" ~ "PC",
+                              TRUE ~ Protocol))
+
+write.csv(all_zerofill, "D:/Documents/Audubon/AGL/ARU/Validation/Verified/all_occ_zerofill_6_15_26.csv")
+
+```
+
+```{r}
+# CHECKING TIME ERRORS
+df_trimmed_final <- read.csv("D:/Documents/Audubon/AGL/ARU/Validation/Verified/ARU_occupancy_zerofill_6_15_26.csv")
+
+df_trimmed_final %>%
+  dplyr::group_by(Route, ARU, Survey, Year) %>%
+  dplyr::summarise(
+    min_time = format(
+      min(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    ),
+    max_time = format(
+      max(as.POSIXct(StartTime, format = "%H:%M:%S"), na.rm = TRUE),
+      "%H:%M:%S"
+    )
+  ) %>%
+  dplyr::mutate(
+    duration = as_hms(max_time) - as_hms(min_time),
+    duration_mins = as.numeric(duration, units = "mins"),
+    flag_over_330 = duration_mins > 210
+  ) %>%
+  arrange(desc(Route)) 
+
+# CHECKING MISSING SURVEYS
+# Review Surveys
+final_data_ordered$IndivCount <- as.integer(final_data_ordered$IndivCount)
+missing_survey_review <- final_data_ordered %>%
+  dplyr::group_by(ARU, Year, Survey) %>%
+  dplyr::summarize(Count = sum(IndivCount), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = Survey, values_from = Count) %>%
+  tidyr::pivot_longer(
+    cols = -c(ARU, Year),
+    names_to = "Missing_Survey",
+    values_to = "Count"
+  ) %>%
+  dplyr::filter(is.na(Count)) %>%
+  select(-Count)
+
+final_zerofill_data %>%
+  dplyr::group_by(ARU, Year, Survey) %>%
+  dplyr::summarize(Count = sum(IndivCount), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = Survey, values_from = Count) %>%
+  tidyr::pivot_longer(
+    cols = -c(ARU, Year),
+    names_to = "Missing_Survey",
+    values_to = "Count"
+  ) %>%
+  dplyr::filter(is.na(Count)) %>%
+  select(-Count)
+
+# both have 9 rows, which is correct!
+
+# Survey Summary
+df_trimmed_final %>%
+  dplyr::group_by(ARU, Year, Survey) %>%
+  dplyr::summarize(Count = sum(IndivCount), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = Survey, values_from = Count) %>%
+  mutate(`1` = ifelse(is.na(`1`), NA, "X")) %>%
+  mutate(`2` = ifelse(is.na(`2`), NA, "X")) %>%
+  mutate(`3` = ifelse(is.na(`3`), NA, "X"))
+
+df_trimmed_final %>%
+  dplyr::group_by(Protocol, ARU, Year, Survey) %>%
+  dplyr::summarize(Count = sum(IndivCount), .groups = "drop") %>%
+  pivot_wider(names_from = Survey, values_from = Count) %>%
+  pivot_longer(
+    cols = -c(Protocol, ARU, Year),
+    names_to = "Missing_Survey",
+    values_to = "Count"
+  ) %>%
+  filter(is.na(Count)) %>%
+  select(Protocol, ARU, Year, Missing_Survey)
+
+
+# Route Summary for mapping
+route_summary <- pc_aru_data %>%
+  dplyr::group_by(Route) %>%
+  dplyr::summarise(
+    Lat = first(na.omit(Lat)),
+    Long = first(na.omit(Long)),
+    Years = paste(sort(unique(Year)), collapse = ", "),
+    .groups = "drop"
+  )
+
+# Number of PC surveys
+pc_aru_data %>%
+  filter(Protocol == "PC") %>%
+  select(Point, Year, Survey) %>%
+  unique()
+```

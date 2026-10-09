@@ -78,6 +78,11 @@ ap.pc.dif	= ap.dat - pc.dat
 ao.pc.dif	= ao.dat - pc.dat
 ap.ao.dif 	= ap.dat - ao.dat
 
+# define theoretical lambda values with the same mean as the data
+lambda_ap = mean(ap.dat)		# 6.70; ARU + PC
+lambda_ao = mean(ao.dat)		# 6.30; ARU only		
+lambda_pc	= mean(pc.dat)		# 3.13; PC only	
+
 ## Adjust for correlation
 lambda_ap_adjust_pc = lambda_ap - cor(ap.dat, pc.dat) * sqrt(lambda_ap * lambda_pc)
 lambda_pc_adjust_ap = lambda_pc - cor(ap.dat, pc.dat) * sqrt(lambda_ap * lambda_pc)
@@ -143,11 +148,6 @@ add_hanging_label <- function(label,
 # COLUMN 1: theoretical vs. obserced distributions to evaluate dispersal and Poisson status ==============================================================================================
 
 ### Visualize the data; does it look Poisson or overdispersed?
-
-# define theoretical lambda values with the same mean as the data
-lambda_ap = mean(ap.dat)		# 6.70; ARU + PC
-lambda_ao = mean(ao.dat)		# 6.30; ARU only		
-lambda_pc	= mean(pc.dat)		# 3.13; PC only	
 
 # object for parameters in the graph
 dmax = 15

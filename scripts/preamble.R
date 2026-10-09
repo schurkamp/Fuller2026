@@ -21,7 +21,9 @@ packages <- c(
   # running statistical tests
   "car",
   # for the Bayesian summaries
-  "AER", "vcd", "skellam"
+  "AER", "vcd", "skellam",
+  # for the hurdle model
+  "glmmTMB"
   )
 
 # Function to load packages

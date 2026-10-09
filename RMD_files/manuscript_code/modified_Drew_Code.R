@@ -1,84 +1,10 @@
 # GOAL: analyze differences between observation protocols
-# NOTE: the figure used for the publication is at the last section of this code.
+# NOTE: the figure used in the publication is in the "richness_comparisons.Rmd" file.
 
 # ==============================================================================================
-# Load required libraries
+# load preamble (required functions & data sets) 
 # ==============================================================================================
-
-## organizational functions
-library(tidyr)
-library(dplyr)
-library(stringr)
-library(lubridate)
-library(kableExtra)
-library(data.table)
-library(plyr)                                                 
-library(ggh4x)
-library(reshape)
-
-# used during the second lollipop graph prep
-library(forcats)
-
-# improve the import functions for data within repositories
-library(readr)
-library(here)
-
-# graphing functions
-library(ggplot2)
-library(patchwork) # required for "plot layout" when merging lollipop graphs
-
-# packages used in summary data sets
-library(flextable)
-library(officer)
-library(purrr)
-
-# package for running statistical tests
-library(car)
-
-# for the Bayesian summaries
-library(AER)
-library(vcd)
-library(skellam)
-
-
-
-################################################    
-# Step 1: import and prepare a combined dataset
-################################################ 
-
-# read the appropriate CSV from GitHub into R
-all_pc_aru_IMPORT <- readr::read_csv(here::here("CSVs/analysis", "all_occupancy_analysis.csv"))
-# 'problem' upon reading is due to columns we don't use. Okay to ignore
-
-# calculate richness for ARU and PC separately
-pc_aru_richness <- all_pc_aru_IMPORT %>%
-  filter(!CommonName %in% c("----", "Trumpeter Swan", "Sandhill Crane", "Snowy Egret", "Forster's Tern", "Sedge Wren", "Common Tern", "Wilson's Snipe")) %>% # had to add the sedge wren and common tern
-  dplyr::filter(IndivCount >=1) %>%
-  dplyr::group_by(Protocol, Route, Year, Point) %>%
-  dplyr::summarize(Richness = length(unique(BirdCd)))
-
-# calculate richness when ARU + PC are added together
-pc_aru_richness_added_together <- all_pc_aru_IMPORT %>%
-  filter(!CommonName %in% c("----", "Trumpeter Swan", "Sandhill Crane", "Snowy Egret", "Forster's Tern", "Sedge Wren", "Common Tern", "Wilson's Snipe")) %>%
-  dplyr::filter(IndivCount >=1) %>%
-  dplyr::group_by(Route, Point, Year) %>% # exclude Protocol to get combined richness
-  dplyr::summarize(Richness = length(unique(BirdCd))) %>%
-  dplyr::mutate(Protocol = "ARU + PC")
-
-# combine the resulting DFs into one DF that has 3 protocol (ARU alone, PC alone, ARU + PC combined)
-all_richness_no0 <- rbind(pc_aru_richness, pc_aru_richness_added_together)
-
-# zero-fill richness summary  
-all_data_plot <- all_richness_no0 %>%
-  dplyr::select(Point, Protocol, Richness, Route, Year) %>%
-  pivot_wider(names_from = Protocol, values_from = Richness) %>%
-  pivot_longer(cols = c(ARU, PC, `ARU + PC`), names_to = "Protocol", values_to = "Richness") %>%
-  dplyr::mutate(Richness = ifelse(is.na(Richness), 0, Richness)) 
-
-# convert to wide-form data
-all_data_long <- cast(all_data_plot, Point+Route+Year~Protocol, value = "Richness")
-
-
+source(here::here("scripts", "preamble.R"), echo = TRUE)
 
 
 

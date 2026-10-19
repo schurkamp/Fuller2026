@@ -282,14 +282,17 @@ We already know the answer. Not only is the answer yes, but ARUs alone outperfor
 An alternative way of stating this question: **how much value would be added by deploying PCs when ARUs are also going to be capturing data?**
 
 ## New approaches
+
 After Drew and I talked through this problem and the potential ways we could run an appropriate analysis, I used generative AI through UMich's portal at Drew's suggestion to see what sorts of analysis it recommended. The following suggestions came from GPT-5.6 Sol, but I only quote it directly when italicized. All non-italic text is my own writing, and I also read the theory and applications of each statistical method in verified human-written sources before proceeding.
 
 I also obtained code from this AI search, but independently checked each component and rewrote all lines of code in the syntax, order, and commenting that made sense to me. The following options were what the AI proposed:
 
 ### Paired nonparametric analysis
+
 This approach works when sites are independent and there is one matched observation per site, but because it is nonparametic we lose some statistical power.I wrote this option down for posterity's sake, but I think our data are clean enough that we don't need to resort to non-parametric testing.
 
 ### Count regression using a negative-binomial generalized linear mixed model
+
 This method estimates the number of species added by using two methods instead of one. In our case, that would mean the number of species added if we run PCs in addition to using ARUs. Per ChatGPT:
 
 *Testing whether the model’s mean is greater than zero is awkward because zero is the boundary of the count distribution. It is often better to report*
@@ -324,14 +327,14 @@ head(all_data_long)
 
 UMich's AI did not direct me to check assumptions before this test, so the rest of this information comes from my digging around. A hurdle negative-binomial model makes the following assumptions about the data:
 
-1. The response variable represents counts that have meaningful zeroes. A "0" in any given row means that PCs did not find any species that ARUs did not.
-2. All sampling units are comparable and all observations are conditionally independent. Different rows should not reflect repeated sampling at a given site. 
-3. The dataset includes "enough" zero and positive observations. I couldn't find any hard numbers for what enough means, but I know from testing out code in the following sections that the packages tell you when your data is insufficient. It also gives a warning for nonconvergence (see below).
-4. The model doesn't assign an observed probability to zero, since only positive observations get included in the first part of the hurdle. There's a specific line of code that ensures this step.
-5. Random effects are accounted for
-6. Other predictors are not collinear
-7. No observations have an outsized effect on the model.
-8. The model converges on a set of model parameters.
+1.  The response variable represents counts that have meaningful zeroes. A "0" in any given row means that PCs did not find any species that ARUs did not.
+2.  All sampling units are comparable and all observations are conditionally independent. Different rows should not reflect repeated sampling at a given site.
+3.  The dataset includes "enough" zero and positive observations. I couldn't find any hard numbers for what enough means, but I know from testing out code in the following sections that the packages tell you when your data is insufficient. It also gives a warning for nonconvergence (see below).
+4.  The model doesn't assign an observed probability to zero, since only positive observations get included in the first part of the hurdle. There's a specific line of code that ensures this step.
+5.  Random effects are accounted for
+6.  Other predictors are not collinear
+7.  No observations have an outsized effect on the model.
+8.  The model converges on a set of model parameters.
 
 Many of these assumptions are solved at the experimental design stage, and the rest can be checked with the model outputs. I could not find any statistical assumption tests I needed to run before proceeding.
 
@@ -435,14 +438,10 @@ $$
 
 ## APPENDIX: writing these methods and results out to be added to the manuscript
 
-
-
-
-
-
 ### Methods
+
 After comparing ARU and PC species richness, we used a two-stage hurdle modeling approach to determine if using both ARUs and PCs leads to higher species richness than a scenario where only the more successful method were deployed. All assumptions for both models were validated before analysis.The first hurdle was a negative-binomial model that tested whether or not the second model significantly contributes observations, and the second hurdle was a zero-truncated Poisson mixed model to determine the relative contribution of the second method when it detected additional species. We included site as a random effect in both models. We then multiplied the relative contribution by the percent of sites at which an additional species was detected to obtain a value for the expected contribution of the second method across all sites.
 
-
 ### Results
+
 PCs detected at least one species not detected by ARUs at 35% of site-years. Hurdle negative-binomial models revealed this value is significant (p = 0.022) and that an estimated 1.14 species are detected when PCs detect a novel species. Averaged across all observations, utilizing both ARUs and PCs generates an expected contribution of 0.4 species per site relative to utilizing only ARUs.
